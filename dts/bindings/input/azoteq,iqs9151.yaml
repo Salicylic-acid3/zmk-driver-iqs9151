@@ -10,3 +10,13 @@ properties:
     type: phandle-array
     required: true
     description: Interrupt GPIO for IQS9151 driver.
+
+  rx-channel:
+    type: int
+    required: true
+    description: Number of RX channels used by the touch panel.
+
+  tx-channel:
+    type: int
+    required: true
+    description: Number of TX channels used by the touch panel.

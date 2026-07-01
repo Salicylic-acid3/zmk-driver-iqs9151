@@ -69,7 +69,7 @@ config INPUT_IQS9151_RESOLUTION_Y
 config INPUT_IQS9151_ATI_TARGETCOUNT
     int "IQS9151 ATI target count"
     range 0 1000
-    default 400
+    default 250
     help
       Trackpad ATI Target (0x119A).
       Limited to 0-1000 to avoid unstable behavior.
