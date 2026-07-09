@@ -2298,6 +2298,8 @@ static void iqs9151_process_frame(struct iqs9151_data *data,
     iqs9151_push_finger_history(data, frame->finger_count, now_ms);
 }
 
+static int iqs9151_set_interrupt(const struct device *dev, const bool en);
+
 static void iqs9151_work_cb(struct k_work *work) {
     struct iqs9151_data *data = CONTAINER_OF(work, struct iqs9151_data, work);
     const struct device *dev = data->dev;
@@ -2309,20 +2311,30 @@ static void iqs9151_work_cb(struct k_work *work) {
     ret = iqs9151_read_frame(cfg, &frame);
     if (ret != 0) {
         LOG_ERR("frame read failed (%d)", ret);
+        (void)iqs9151_set_interrupt(dev, true);
         return;
     }
 
     iqs9151_process_frame(data, &frame, now_ms);
+
+    (void)iqs9151_set_interrupt(dev, true);
 }
 
 static void iqs9151_gpio_cb(const struct device *port, struct gpio_callback *cb, uint32_t pins) {
     struct iqs9151_data *data = CONTAINER_OF(cb, struct iqs9151_data, gpio_cb);
+
+    (void)iqs9151_set_interrupt(data->dev, false);
+
+    ARG_UNUSED(port);
+    ARG_UNUSED(pins);
+
     k_work_submit(&data->work);
 }
 
 static int iqs9151_set_interrupt(const struct device *dev, const bool en) {
     const struct iqs9151_config *config = dev->config;
-    int ret = gpio_pin_interrupt_configure_dt( &config->irq_gpio, en ? GPIO_INT_EDGE_TO_ACTIVE : GPIO_INT_DISABLE);
+    int ret = gpio_pin_interrupt_configure_dt(
+        &config->irq_gpio, en ? GPIO_INT_LEVEL_ACTIVE : GPIO_INT_DISABLE);
     if (ret < 0) {
         LOG_ERR("can't set interrupt");
     }
@@ -2514,8 +2526,8 @@ static int iqs9151_configure(const struct device *dev) {
 
 static int iqs9151_apply_kconfig_overrides(const struct device *dev) {
     const struct iqs9151_config *cfg = dev->config;
-    const uint16_t x_resolution = (uint16_t)cfg->rx_channel << 8;
-    const uint16_t y_resolution = (uint16_t)cfg->tx_channel << 8;
+    const uint16_t x_resolution = (uint16_t)(cfg->rx_channel - 1) << 8;
+    const uint16_t y_resolution = (uint16_t)(cfg->tx_channel - 1) << 8;
     uint16_t rotate_bits = 0U;
     int ret;
 

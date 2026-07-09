@@ -50,7 +50,7 @@
 /* ATI Multipliers / Dividers */
 /* Memory Map Position 0x117A - 0x1195 */
 #define TP_ATI_MULTDIV_L                         0x21
-#define TP_ATI_MULTDIV_H                         0x4D
+#define TP_ATI_MULTDIV_H                         0x53
 #define ALP_ATI_COARSE_RX0_L                     0x87
 #define ALP_ATI_COARSE_RX0_H                     0x5A
 #define ALP_ATI_COARSE_RX1_L                     0x87
@@ -191,7 +191,7 @@
 #define XY_DYNAMIC_FILTER_TOP_SPEED_1            0x01
 #define XY_DYNAMIC_FILTER_BOTTOM_BETA            0x0A
 #define XY_DYNAMIC_FILTER_STATIC_FILTER_BETA     0x14
-#define STATIONARY_TOUCH_MOV_THRESHOLD           0x05
+#define STATIONARY_TOUCH_MOV_THRESHOLD           0x00
 #define FINGER_SPLIT_FACTOR                      0x09
 #define X_TRIM_VALUE                             0x14
 #define Y_TRIM_VALUE                             0x14
