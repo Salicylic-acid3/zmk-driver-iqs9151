@@ -37,6 +37,10 @@ LOG_MODULE_REGISTER(iqs9151, CONFIG_INPUT_IQS9151_LOG_LEVEL);
 #define IQS9151_RSTD_DELAY_MS 100
 #define IQS9151_ATI_TIMEOUT_MS 1000
 #define IQS9151_ATI_POLL_INTERVAL_MS 10
+#define IQS9151_ATI_AUTO_TUNE_START_DIV 9
+#define IQS9151_ATI_AUTO_TUNE_MIN_DIV 6
+#define IQS9151_ATI_AUTO_TUNE_MIN_COUNT 600
+#define IQS9151_ATI_RESULT_MASK 0x01FF
 #define INERTIA_FP_SHIFT 8
 #define EMA_FP_SHIFT INERTIA_FP_SHIFT
 #define EMA_ALPHA_DEN (1 << EMA_FP_SHIFT)
@@ -584,6 +588,20 @@ static int iqs9151_write_u16(const struct iqs9151_config *cfg, uint16_t reg, uin
 
     sys_put_le16(value, buf);
     return iqs9151_i2c_write(cfg, reg, buf, sizeof(buf));
+}
+
+static uint8_t iqs9151_tp_ati_multdiv_h(uint8_t div) {
+    return (uint8_t)((1U << 7) | (div << 1) | 1U);
+}
+
+static int iqs9151_write_tp_ati_div(const struct iqs9151_config *cfg, uint8_t div) {
+    const uint8_t ati_multdiv[2] = {
+        TP_ATI_MULTDIV_L,
+        iqs9151_tp_ati_multdiv_h(div),
+    };
+
+    return iqs9151_i2c_write(cfg, IQS9151_ADDR_ATI_MULTIPLIERS, ati_multdiv,
+                             sizeof(ati_multdiv));
 }
 
 static int iqs9151_read_u16(const struct iqs9151_config *cfg, uint16_t reg, uint16_t *value) {
@@ -2375,6 +2393,122 @@ static int iqs9151_wait_for_ati(const struct device *dev, uint16_t timeout_ms) {
     return -EIO;
 }
 
+static int iqs9151_wait_for_post_ati_ready(const struct device *dev, uint16_t timeout_ms) {
+    const struct iqs9151_config *cfg = dev->config;
+    int64_t start_ms = k_uptime_get();
+    bool force_poll = false;
+    int64_t rdy_busy_start_ms = 0;
+
+    while ((k_uptime_get() - start_ms) < timeout_ms) {
+        uint8_t info[2];
+        int ret;
+
+        if (!force_poll && !gpio_pin_get_dt(&cfg->irq_gpio)) {
+            if (rdy_busy_start_ms == 0) {
+                rdy_busy_start_ms = k_uptime_get();
+            }
+
+            if ((k_uptime_get() - rdy_busy_start_ms) >= IQS9151_ATI_TIMEOUT_MS) {
+                force_poll = true;
+                LOG_DBG("ATI RDY busy too long, force polling I2C");
+            } else {
+                k_sleep(K_MSEC(IQS9151_ATI_POLL_INTERVAL_MS));
+                continue;
+            }
+        } else {
+            rdy_busy_start_ms = 0;
+        }
+
+        ret = iqs9151_i2c_read(cfg, IQS9151_ADDR_INFO_FLAGS, info, sizeof(info));
+        if (ret == 0) {
+            return 0;
+        }
+
+        k_sleep(K_MSEC(IQS9151_ATI_POLL_INTERVAL_MS));
+    }
+
+    LOG_ERR("ATI post-ready timeout after %dms", timeout_ms);
+    return -EIO;
+}
+
+static int iqs9151_read_ati_min_count(const struct device *dev, uint16_t *min_count) {
+    const struct iqs9151_config *cfg = dev->config;
+    const size_t node_count = (size_t)cfg->rx_channel * (size_t)cfg->tx_channel;
+    uint16_t min_value = UINT16_MAX;
+
+    if (min_count == NULL || node_count == 0U) {
+        return -EINVAL;
+    }
+
+    for (size_t index = 0U; index < node_count; index++) {
+        uint8_t raw[2];
+        int ret;
+
+        ret = iqs9151_i2c_read(cfg, IQS9151_ADDR_ATI_RESULT_BASE + (uint16_t)(index * 2U),
+                               raw, sizeof(raw));
+        if (ret != 0) {
+            return ret;
+        }
+
+        const uint16_t value = (uint16_t)(sys_get_le16(raw) & IQS9151_ATI_RESULT_MASK);
+        if (value < min_value) {
+            min_value = value;
+        }
+    }
+
+    *min_count = min_value;
+    return 0;
+}
+
+static int iqs9151_auto_tune_ati(const struct device *dev) {
+    const struct iqs9151_config *cfg = dev->config;
+    uint8_t div = IQS9151_ATI_AUTO_TUNE_START_DIV;
+
+    while (true) {
+        uint16_t min_count = 0U;
+        int ret;
+
+        ret = iqs9151_write_tp_ati_div(cfg, div);
+        if (ret != 0) {
+            LOG_ERR("Failed to set ATI divider %u (%d)", div, ret);
+            return ret;
+        }
+
+        ret = iqs9151_run_ati(cfg);
+        if (ret != 0) {
+            LOG_ERR("ATI request failed at div=%u (%d)", div, ret);
+            return ret;
+        }
+
+        ret = iqs9151_wait_for_ati(dev, IQS9151_ATI_TIMEOUT_MS);
+        if (ret != 0) {
+            LOG_ERR("ATI wait failed at div=%u (%d)", div, ret);
+            return ret;
+        }
+
+        ret = iqs9151_wait_for_post_ati_ready(dev, IQS9151_ATI_TIMEOUT_MS);
+        if (ret != 0) {
+            LOG_ERR("ATI post-ready failed at div=%u (%d)", div, ret);
+            return ret;
+        }
+
+        ret = iqs9151_read_ati_min_count(dev, &min_count);
+        if (ret != 0) {
+            LOG_ERR("ATI result read failed at div=%u (%d)", div, ret);
+            return ret;
+        }
+
+        LOG_DBG("ATI tune div=%u min_count=%u threshold=%u", div, min_count,
+                IQS9151_ATI_AUTO_TUNE_MIN_COUNT);
+
+        if (min_count >= IQS9151_ATI_AUTO_TUNE_MIN_COUNT || div <= IQS9151_ATI_AUTO_TUNE_MIN_DIV) {
+            return 0;
+        }
+
+        div--;
+    }
+}
+
 static int iqs9151_ack_reset(const struct device *dev) {
     const struct iqs9151_config *cfg = dev->config;
     uint8_t ctrl[2];
@@ -2688,17 +2822,10 @@ static int iqs9151_init(const struct device *dev) {
 
     iqs9151_wait_for_ready(dev, 100);
 
-    // ATI
-    ret = iqs9151_run_ati(cfg);
-    if (ret) {
-        LOG_ERR("ATI request failed (%d)", ret);
-        return ret;
-    }
-    LOG_DBG("ATI requested");
-
-    ret = iqs9151_wait_for_ati(dev, IQS9151_ATI_TIMEOUT_MS);
+    // ATI auto-tune
+    ret = iqs9151_auto_tune_ati(dev);
     if (ret != 0) {
-        LOG_ERR("ATI failed (%d)", ret);
+        LOG_ERR("ATI auto-tune failed (%d)", ret);
         return ret;
     }
     LOG_DBG("ATI complete");
