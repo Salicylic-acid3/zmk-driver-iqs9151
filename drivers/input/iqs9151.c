@@ -28,10 +28,6 @@ LOG_MODULE_REGISTER(iqs9151, CONFIG_INPUT_IQS9151_LOG_LEVEL);
 #define IQS9151_RXTX_MAP_SIZE 46
 #define IQS9151_RXTX_OPEN_INDEX (IQS9151_RXTX_MAP_SIZE - 1)
 #define IQS9151_RXTX_MAP_DATA_SIZE (IQS9151_RXTX_MAP_SIZE - 1)
-#define IQS9151_TX_MAP_TOP 0x2B
-#define IQS9151_RX_MAP_START 0x0A
-#define IQS9151_TX_MAP_REF_COUNT 10
-#define IQS9151_RX_MAP_REF_COUNT 11
 #define IQS9151_ADDR_TRACKPAD_RX_CHANNEL 0x11E3
 #define IQS9151_ADDR_TRACKPAD_TX_CHANNEL 0x11E4
 #define IQS9151_RSTD_DELAY_MS 100
@@ -98,8 +94,6 @@ LOG_MODULE_REGISTER(iqs9151, CONFIG_INPUT_IQS9151_LOG_LEVEL);
 struct iqs9151_config {
     struct i2c_dt_spec i2c;
     struct gpio_dt_spec irq_gpio;
-    uint8_t tx_channel;
-    uint8_t rx_channel;
 };
 struct iqs9151_frame {
     int16_t rel_x;
@@ -433,6 +427,20 @@ static const uint8_t iqs9151_main_config[] = {
     JITTER_FILTER_DELTA,
     FINGER_CONFIDENCE_THRESHOLD,
 };
+
+static const uint8_t iqs9151_rxtx_map[] = {
+    RX_TX_MAP_0,  RX_TX_MAP_1,  RX_TX_MAP_2,  RX_TX_MAP_3,  RX_TX_MAP_4,
+    RX_TX_MAP_5,  RX_TX_MAP_6,  RX_TX_MAP_7,  RX_TX_MAP_8,  RX_TX_MAP_9,
+    RX_TX_MAP_10, RX_TX_MAP_11, RX_TX_MAP_12, RX_TX_MAP_13, RX_TX_MAP_14,
+    RX_TX_MAP_15, RX_TX_MAP_16, RX_TX_MAP_17, RX_TX_MAP_18, RX_TX_MAP_19,
+    RX_TX_MAP_20, RX_TX_MAP_21, RX_TX_MAP_22, RX_TX_MAP_23, RX_TX_MAP_24,
+    RX_TX_MAP_25, RX_TX_MAP_26, RX_TX_MAP_27, RX_TX_MAP_28, RX_TX_MAP_29,
+    RX_TX_MAP_30, RX_TX_MAP_31, RX_TX_MAP_32, RX_TX_MAP_33, RX_TX_MAP_34,
+    RX_TX_MAP_35, RX_TX_MAP_36, RX_TX_MAP_37, RX_TX_MAP_38, RX_TX_MAP_39,
+    RX_TX_MAP_40, RX_TX_MAP_41, RX_TX_MAP_42, RX_TX_MAP_43, RX_TX_MAP_44,
+    RX_TX_OPEN,
+};
+
 static const uint8_t iqs9151_channel_disable[] = {
     TPCHANNELDISABLE_0,  TPCHANNELDISABLE_1,  TPCHANNELDISABLE_2,
     TPCHANNELDISABLE_3,  TPCHANNELDISABLE_4,  TPCHANNELDISABLE_5,
@@ -529,40 +537,6 @@ static const struct iqs9151_inertia_gate_params iqs9151_cursor_gate_params = {
     .min_samples = CURSOR_INERTIA_MIN_SAMPLES,
     .min_avg_speed = CURSOR_INERTIA_MIN_AVG_SPEED,
 };
-
-static int iqs9151_build_rxtx_map(uint8_t tx_channel, uint8_t rx_channel,
-                                  uint8_t *map, size_t map_len) {
-    size_t idx = 0U;
-    int32_t rx_start, tx_start;
-
-    if ((map == NULL) || (map_len != IQS9151_RXTX_MAP_SIZE)) {
-        return -EINVAL;
-    }
-
-    if ((tx_channel == 0U) || (tx_channel > IQS9151_TX_MAP_REF_COUNT) ||
-        (rx_channel == 0U) || (rx_channel > IQS9151_RX_MAP_REF_COUNT)) {
-        return -EINVAL;
-    }
-
-    if ((size_t)tx_channel + (size_t)rx_channel > IQS9151_RXTX_MAP_DATA_SIZE) {
-        return -EINVAL;
-    }
-
-    memset(map, RX_TX_OPEN, map_len);
-
-    rx_start = IQS9151_RX_MAP_START;
-    for (uint8_t i = 0U; i < rx_channel; i++) {
-        map[idx++] = (uint8_t)(rx_start - i);
-    }
-
-    tx_start = IQS9151_TX_MAP_TOP - (IQS9151_TX_MAP_REF_COUNT - tx_channel);
-    for (uint8_t i = 0U; i < tx_channel; i++) {
-        map[idx++] = (uint8_t)(tx_start - i);
-    }
-
-    map[IQS9151_RXTX_OPEN_INDEX] = RX_TX_OPEN;
-    return 0;
-}
 
 static int iqs9151_i2c_write(const struct iqs9151_config *cfg, uint16_t reg, const uint8_t *buf, size_t len) {
     uint8_t tx[2 + IQS9151_I2C_CHUNK_SIZE];
@@ -664,7 +638,7 @@ static int iqs9151_write_chunks(const struct device *dev, const struct iqs9151_c
 
 static int iqs9151_check_product_number(const struct device *dev) {
     const struct iqs9151_config *cfg = dev->config;
-    uint8_t product[2];
+    uint8_t product[2] = {0};
     int ret;
     
     ret = iqs9151_i2c_read(cfg, IQS9151_ADDR_PRODUCT_NUMBER, product, sizeof(product));
@@ -2433,7 +2407,7 @@ static int iqs9151_wait_for_post_ati_ready(const struct device *dev, uint16_t ti
 
 static int iqs9151_read_ati_min_count(const struct device *dev, uint16_t *min_count) {
     const struct iqs9151_config *cfg = dev->config;
-    const size_t node_count = (size_t)cfg->rx_channel * (size_t)cfg->tx_channel;
+    const size_t node_count = TRACKPAD_SETTINGS_0_1 * TRACKPAD_SETTINGS_1_0;
     uint16_t min_value = UINT16_MAX;
 
     if (min_count == NULL || node_count == 0U) {
@@ -2451,7 +2425,7 @@ static int iqs9151_read_ati_min_count(const struct device *dev, uint16_t *min_co
         }
 
         const uint16_t value = (uint16_t)(sys_get_le16(raw) & IQS9151_ATI_RESULT_MASK);
-        if (value < min_value) {
+        if (value < min_value && value != 0U) {
             min_value = value;
         }
     }
@@ -2612,16 +2586,7 @@ static int iqs9151_set_event_mode(const struct device *dev) {
 
 static int iqs9151_configure(const struct device *dev) {
     const struct iqs9151_config *cfg = dev->config;
-    uint8_t rxtx_map[IQS9151_RXTX_MAP_SIZE];
     int ret;
-
-    ret = iqs9151_build_rxtx_map(cfg->tx_channel, cfg->rx_channel,
-                                 rxtx_map, sizeof(rxtx_map));
-    if (ret != 0) {
-        LOG_ERR("Invalid tx/rx-channel setting tx=%u rx=%u", cfg->tx_channel,
-                cfg->rx_channel);
-        return ret;
-    }
 
     iqs9151_wait_for_ready(dev, 500);
 
@@ -2638,8 +2603,8 @@ static int iqs9151_configure(const struct device *dev) {
         return ret;
     }
     ret = iqs9151_write_chunks(dev, cfg, IQS9151_ADDR_RX_TX_MAPPING,
-                                    rxtx_map,
-                                    ARRAY_SIZE(rxtx_map));
+                                    iqs9151_rxtx_map,
+                                    ARRAY_SIZE(iqs9151_rxtx_map));
     if (ret) {
         return ret;
     }
@@ -2660,8 +2625,6 @@ static int iqs9151_configure(const struct device *dev) {
 
 static int iqs9151_apply_kconfig_overrides(const struct device *dev) {
     const struct iqs9151_config *cfg = dev->config;
-    const uint16_t x_resolution = (uint16_t)(cfg->rx_channel - 1) << 8;
-    const uint16_t y_resolution = (uint16_t)(cfg->tx_channel - 1) << 8;
     uint16_t rotate_bits = 0U;
     int ret;
 
@@ -2684,34 +2647,6 @@ static int iqs9151_apply_kconfig_overrides(const struct device *dev) {
                                   rotate_bits);
     if (ret != 0) {
         LOG_ERR("Failed to apply rotate settings (%d)", ret);
-        return ret;
-    }
-
-    ret = iqs9151_i2c_write(cfg, IQS9151_ADDR_TRACKPAD_RX_CHANNEL,
-                            (const uint8_t[]){cfg->rx_channel}, 1);
-    if (ret != 0) {
-        LOG_ERR("Failed to apply RX channel count (%d)", ret);
-        return ret;
-    }
-
-    ret = iqs9151_i2c_write(cfg, IQS9151_ADDR_TRACKPAD_TX_CHANNEL,
-                            (const uint8_t[]){cfg->tx_channel}, 1);
-    if (ret != 0) {
-        LOG_ERR("Failed to apply TX channel count (%d)", ret);
-        return ret;
-    }
-
-    ret = iqs9151_write_u16(cfg, IQS9151_ADDR_X_RESOLUTION,
-                            x_resolution);
-    if (ret != 0) {
-        LOG_ERR("Failed to apply X resolution (%d)", ret);
-        return ret;
-    }
-
-    ret = iqs9151_write_u16(cfg, IQS9151_ADDR_Y_RESOLUTION,
-                            y_resolution);
-    if (ret != 0) {
-        LOG_ERR("Failed to apply Y resolution (%d)", ret);
         return ret;
     }
 
@@ -2773,7 +2708,7 @@ static int iqs9151_init(const struct device *dev) {
         return ret;
     }
 
-    iqs9151_wait_for_ready(dev, 500);
+    iqs9151_wait_for_ready(dev, 1500);
     
     // Check Product Number
     ret = iqs9151_check_product_number(dev);
@@ -2992,8 +2927,6 @@ void iqs9151_test_force_pinch_session(void *ctx, bool active) {
     static const struct iqs9151_config iqs9151_config_##inst = {    \
         .i2c = I2C_DT_SPEC_INST_GET(inst),                                      \
         .irq_gpio = GPIO_DT_SPEC_INST_GET(inst, irq_gpios),                     \
-        .tx_channel = DT_INST_PROP_OR(inst, tx_channel, 11),                    \
-        .rx_channel = DT_INST_PROP_OR(inst, rx_channel, 11),                    \
   };                                                                          \
   static struct iqs9151_data iqs9151_data_##inst;                 \
   DEVICE_DT_INST_DEFINE(inst, iqs9151_init, NULL,                       \
