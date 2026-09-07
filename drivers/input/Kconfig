@@ -103,6 +103,25 @@ config INPUT_IQS9151_DYNAMIC_FILTER_BOTTOM_BETA
       XY Dynamic Filter Bottom Beta (0x11EE).
       Currently not applied by the driver.
 
+config INPUT_IQS9151_TOUCH_STATE_ENABLE
+    bool "IQS9151 raw touch state event"
+    default n
+    help
+      Emit a key event whenever a finger touches or leaves the trackpad,
+      independent of gesture detection. On a split keyboard only processed
+      input events are relayed between halves, so enabling this on one half
+      lets the other half react to "that pad is being touched" - for example
+      to hold a layer while the other hand rests on its trackpad.
+
+config INPUT_IQS9151_TOUCH_STATE_CODE
+    int "IQS9151 touch state event code"
+    depends on INPUT_IQS9151_TOUCH_STATE_ENABLE
+    default 264
+    help
+      Input event code reported for the touch state. Defaults to 264
+      (INPUT_BTN_8), which is not used by any of the gesture events
+      (BTN_0..BTN_7).
+
 config INPUT_IQS9151_1F_TAP_ENABLE
     bool "IQS9151 single-finger tap enable"
     default y
