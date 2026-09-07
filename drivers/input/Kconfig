@@ -122,6 +122,15 @@ config INPUT_IQS9151_TOUCH_STATE_CODE
       (INPUT_BTN_8), which is not used by any of the gesture events
       (BTN_0..BTN_7).
 
+config INPUT_IQS9151_TOUCH_STATE_2F_CODE
+    int "IQS9151 two-finger touch state event code"
+    depends on INPUT_IQS9151_TOUCH_STATE_ENABLE
+    default 265
+    help
+      Input event code reported while two or more fingers are on the pad.
+      Defaults to 265 (INPUT_BTN_9). Reported alongside the single-finger
+      touch state, so two fingers raise both codes.
+
 config INPUT_IQS9151_1F_TAP_ENABLE
     bool "IQS9151 single-finger tap enable"
     default y

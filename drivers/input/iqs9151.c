@@ -224,6 +224,7 @@ struct iqs9151_data {
     bool three_finger_two_lead_valid;
     struct iqs9151_frame prev_frame;
     bool touch_state_sent;
+    bool touch_state_2f_sent;
     bool three_active;
     bool three_hold_sent;
     bool three_swipe_sent;
@@ -1974,19 +1975,26 @@ static int iqs9151_read_frame(const struct iqs9151_config *cfg,
  * pad is being touched at all - e.g. to hold a layer while the other hand is
  * resting on its trackpad.
  */
-static void iqs9151_set_touch_state(struct iqs9151_data *data, bool touched) {
-    if (data->touch_state_sent == touched) {
-        return;
+static void iqs9151_set_touch_state(struct iqs9151_data *data, uint8_t finger_count) {
+    const bool touched = (finger_count > 0U);
+    const bool multi = (finger_count >= 2U);
+
+    if (data->touch_state_sent != touched) {
+        data->touch_state_sent = touched;
+        iqs9151_report_key_event(data->dev, (uint16_t)CONFIG_INPUT_IQS9151_TOUCH_STATE_CODE,
+                                 touched ? 1 : 0, true, K_FOREVER);
     }
 
-    data->touch_state_sent = touched;
-    iqs9151_report_key_event(data->dev, (uint16_t)CONFIG_INPUT_IQS9151_TOUCH_STATE_CODE,
-                             touched ? 1 : 0, true, K_FOREVER);
+    if (data->touch_state_2f_sent != multi) {
+        data->touch_state_2f_sent = multi;
+        iqs9151_report_key_event(data->dev, (uint16_t)CONFIG_INPUT_IQS9151_TOUCH_STATE_2F_CODE,
+                                 multi ? 1 : 0, true, K_FOREVER);
+    }
 }
 #else
-static inline void iqs9151_set_touch_state(struct iqs9151_data *data, bool touched) {
+static inline void iqs9151_set_touch_state(struct iqs9151_data *data, uint8_t finger_count) {
     ARG_UNUSED(data);
-    ARG_UNUSED(touched);
+    ARG_UNUSED(finger_count);
 }
 #endif
 
@@ -1999,7 +2007,7 @@ static bool iqs9151_handle_show_reset(struct iqs9151_data *data,
     }
 
     LOG_WRN("SHOW_RESET detected: info=0x%04x", frame->info_flags);
-    iqs9151_set_touch_state(data, false);
+    iqs9151_set_touch_state(data, 0U);
     iqs9151_reset_gesture_states(data, dev, true);
     iqs9151_inertia_cancel(&data->inertia_scroll, &data->inertia_scroll_work);
     iqs9151_inertia_cancel(&data->inertia_cursor, &data->inertia_cursor_work);
@@ -2278,7 +2286,7 @@ static void iqs9151_process_frame(struct iqs9151_data *data,
         return;
     }
 
-    iqs9151_set_touch_state(data, frame->finger_count > 0U);
+    iqs9151_set_touch_state(data, frame->finger_count);
 
     released_from_hold =
         iqs9151_update_gesture_sessions(data, frame, &prev_frame, &two_result);
