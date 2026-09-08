@@ -2659,6 +2659,13 @@ static int iqs9151_configure(const struct device *dev) {
     return ret;
 }
 
+/*
+ * These writes only tune the device; none of them is required for the trackpad
+ * to report. A failure used to abort iqs9151_init(), which left the pad
+ * completely silent - no cursor, no scroll, no gestures - for what may be a
+ * single unacknowledged I2C transfer. Warn and carry on with the value already
+ * in the device configuration instead.
+ */
 static int iqs9151_apply_kconfig_overrides(const struct device *dev) {
     const struct iqs9151_config *cfg = dev->config;
     uint16_t rotate_bits = 0U;
@@ -2682,51 +2689,44 @@ static int iqs9151_apply_kconfig_overrides(const struct device *dev) {
                                       IQS9151_TRACKPAD_SETTING_SWITCH_XY,
                                   rotate_bits);
     if (ret != 0) {
-        LOG_ERR("Failed to apply rotate settings (%d)", ret);
-        return ret;
+        LOG_WRN("Failed to apply rotate settings (%d), keeping the device default", ret);
     }
 
     ret = iqs9151_write_u16(cfg, IQS9151_ADDR_TRACKPAD_ATI_TARGET,
                             (uint16_t)CONFIG_INPUT_IQS9151_ATI_TARGETCOUNT);
     if (ret != 0) {
-        LOG_ERR("Failed to apply ATI target (%d)", ret);
-        return ret;
+        LOG_WRN("Failed to apply ATI target (%d), keeping the device default", ret);
     }
 
     ret = iqs9151_write_u16(cfg, IQS9151_ADDR_X_RESOLUTION,
                             (uint16_t)CONFIG_INPUT_IQS9151_RESOLUTION_X);
     if (ret != 0) {
-        LOG_ERR("Failed to apply X resolution (%d)", ret);
-        return ret;
+        LOG_WRN("Failed to apply X resolution (%d), keeping the device default", ret);
     }
 
     ret = iqs9151_write_u16(cfg, IQS9151_ADDR_Y_RESOLUTION,
                             (uint16_t)CONFIG_INPUT_IQS9151_RESOLUTION_Y);
     if (ret != 0) {
-        LOG_ERR("Failed to apply Y resolution (%d)", ret);
-        return ret;
+        LOG_WRN("Failed to apply Y resolution (%d), keeping the device default", ret);
     }
 
     ret = iqs9151_write_u16(cfg, IQS9151_ADDR_XY_DYNAMIC_FILTER_BOTTOM_SPEED,
                             (uint16_t)CONFIG_INPUT_IQS9151_DYNAMIC_FILTER_BOTTOM_SPEED);
     if (ret != 0) {
-        LOG_ERR("Failed to apply dynamic filter bottom speed (%d)", ret);
-        return ret;
+        LOG_WRN("Failed to apply dynamic filter bottom speed (%d), keeping the device default", ret);
     }
 
     ret = iqs9151_write_u16(cfg, IQS9151_ADDR_XY_DYNAMIC_FILTER_TOP_SPEED,
                             (uint16_t)CONFIG_INPUT_IQS9151_DYNAMIC_FILTER_TOP_SPEED);
     if (ret != 0) {
-        LOG_ERR("Failed to apply dynamic filter top speed (%d)", ret);
-        return ret;
+        LOG_WRN("Failed to apply dynamic filter top speed (%d), keeping the device default", ret);
     }
 
     ret = iqs9151_i2c_write(
         cfg, IQS9151_ADDR_XY_DYNAMIC_FILTER_BOTTOM_BETA,
         (const uint8_t[]){(uint8_t)CONFIG_INPUT_IQS9151_DYNAMIC_FILTER_BOTTOM_BETA}, 1);
     if (ret != 0) {
-        LOG_ERR("Failed to apply dynamic filter bottom beta (%d)", ret);
-        return ret;
+        LOG_WRN("Failed to apply dynamic filter bottom beta (%d), keeping the device default", ret);
     }
 
     return 0;
