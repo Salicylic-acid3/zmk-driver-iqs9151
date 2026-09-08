@@ -1968,6 +1968,17 @@ static int iqs9151_read_frame(const struct iqs9151_config *cfg,
 }
 
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_TOUCH_STATE_ENABLE)
+
+/*
+ * Bounded, unlike the K_FOREVER the gesture events use. These fire on every
+ * touch and release, so a full input queue here would block the work queue
+ * this driver runs on - and on a split peripheral that stalls the half until
+ * the watchdog resets it. The cached state is only updated once the report is
+ * actually queued, so a dropped one is retried on the next frame instead of
+ * leaving the two halves disagreeing about whether the pad is being touched.
+ */
+#define IQS9151_TOUCH_STATE_TIMEOUT K_MSEC(10)
+
 /*
  * Report a plain "a finger is on the pad" key event, independent of any gesture
  * decision. Split keyboards relay input events (not raw coordinates) from the
@@ -1980,15 +1991,25 @@ static void iqs9151_set_touch_state(struct iqs9151_data *data, uint8_t finger_co
     const bool multi = (finger_count >= 2U);
 
     if (data->touch_state_sent != touched) {
-        data->touch_state_sent = touched;
-        iqs9151_report_key_event(data->dev, (uint16_t)CONFIG_INPUT_IQS9151_TOUCH_STATE_CODE,
-                                 touched ? 1 : 0, true, K_FOREVER);
+        int ret = iqs9151_report_key_event(data->dev,
+                                           (uint16_t)CONFIG_INPUT_IQS9151_TOUCH_STATE_CODE,
+                                           touched ? 1 : 0, true, IQS9151_TOUCH_STATE_TIMEOUT);
+        if (ret == 0) {
+            data->touch_state_sent = touched;
+        } else {
+            LOG_WRN("Touch state report dropped (%d), retrying on the next frame", ret);
+        }
     }
 
     if (data->touch_state_2f_sent != multi) {
-        data->touch_state_2f_sent = multi;
-        iqs9151_report_key_event(data->dev, (uint16_t)CONFIG_INPUT_IQS9151_TOUCH_STATE_2F_CODE,
-                                 multi ? 1 : 0, true, K_FOREVER);
+        int ret = iqs9151_report_key_event(data->dev,
+                                           (uint16_t)CONFIG_INPUT_IQS9151_TOUCH_STATE_2F_CODE,
+                                           multi ? 1 : 0, true, IQS9151_TOUCH_STATE_TIMEOUT);
+        if (ret == 0) {
+            data->touch_state_2f_sent = multi;
+        } else {
+            LOG_WRN("Two-finger touch state report dropped (%d), retrying on the next frame", ret);
+        }
     }
 }
 #else
