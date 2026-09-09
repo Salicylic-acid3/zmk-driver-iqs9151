@@ -333,6 +333,16 @@ config INPUT_IQS9151_2F_PINCH_WHEEL_GAIN_X10
       Gain for 2F pinch REL_WHEEL output inside the driver.
       10 = 1.0x, 20 = 2.0x, 5 = 0.5x.
 
+config INPUT_IQS9151_2F_PINCH_WHEEL_HORIZONTAL
+    bool "IQS9151 report pinch on the horizontal wheel"
+    default n
+    help
+      Report the 2F pinch wheel as REL_HWHEEL instead of REL_WHEEL. Enable
+      this when the listener corrects a rotated pad with
+      zip_scroll_transform INPUT_TRANSFORM_XY_SWAP: that swap applies to
+      every wheel event, so pinch would otherwise arrive at the host as a
+      horizontal scroll and never zoom.
+
 config INPUT_IQS9151_3F_TAP_ENABLE
     bool "IQS9151 three-finger tap enable"
     default y

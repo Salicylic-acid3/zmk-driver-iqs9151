@@ -87,6 +87,21 @@ LOG_MODULE_REGISTER(iqs9151, CONFIG_INPUT_IQS9151_LOG_LEVEL);
 #define TWO_FINGER_TAP_MOVE CONFIG_INPUT_IQS9151_2F_TAP_MOVE
 #define TWO_FINGER_SCROLL_START_MOVE CONFIG_INPUT_IQS9151_2F_SCROLL_START_MOVE
 #define TWO_FINGER_PINCH_START_DISTANCE CONFIG_INPUT_IQS9151_2F_PINCH_START_DISTANCE
+/*
+ * Pinch reports a vertical wheel, because that is what a host turns into zoom
+ * when a modifier is held. A board whose pad is mounted rotated corrects the
+ * orientation with zip_scroll_transform INPUT_TRANSFORM_XY_SWAP, which swaps
+ * REL_WHEEL and REL_HWHEEL for every event on the listener - including this
+ * one, so the zoom ends up on the horizontal wheel and does nothing. Emitting
+ * pinch on the horizontal wheel makes that swap land it back on the vertical
+ * one at the host.
+ */
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_2F_PINCH_WHEEL_HORIZONTAL)
+#define IQS9151_PINCH_WHEEL_CODE INPUT_REL_HWHEEL
+#else
+#define IQS9151_PINCH_WHEEL_CODE INPUT_REL_WHEEL
+#endif
+
 #define TWO_FINGER_PINCH_WHEEL_DIV 12
 #define TWO_FINGER_PINCH_WHEEL_GAIN_X10 CONFIG_INPUT_IQS9151_2F_PINCH_WHEEL_GAIN_X10
 #define TWO_FINGER_PINCH_WHEEL_GAIN_DEN 10
@@ -2272,7 +2287,8 @@ static void iqs9151_report_frame_events(const struct device *dev,
 
     if (two_result->pinch_active) {
         if (two_result->pinch_wheel != 0) {
-            iqs9151_report_rel_event(dev, INPUT_REL_WHEEL, two_result->pinch_wheel, true, K_NO_WAIT);
+            iqs9151_report_rel_event(dev, IQS9151_PINCH_WHEEL_CODE, two_result->pinch_wheel, true,
+                                     K_NO_WAIT);
         }
     } else if (two_result->scroll_active) {
         const bool have_x = two_result->scroll_x != 0;
