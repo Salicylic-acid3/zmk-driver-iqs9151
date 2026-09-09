@@ -39,3 +39,12 @@ menuconfig ZMK_INPUT_PROCESSOR_BEHAVIORS_CONSUME
       Invoke behaviors for matched events, then neutralize the event so it
       does not generate mouse button output. This avoids relying on STOP
       being honored in layer overrides.
+
+menuconfig ZMK_INPUT_PROCESSOR_DUAL_PAD
+    bool "Dual pad gesture input processor"
+    default y
+    help
+      Fuse one finger on each half of a split trackpad into a single gesture:
+      moving both the same way scrolls, moving them apart or together zooms.
+      Needs each half to report its touch state, which the IQS9151 driver does
+      with CONFIG_INPUT_IQS9151_TOUCH_STATE_ENABLE.

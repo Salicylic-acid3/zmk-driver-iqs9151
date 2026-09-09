@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: MIT
+
+description: |
+  Fuses one finger on each half of a split trackpad into a single gesture.
+  Reference it from both listeners with param1 = 0 for the left pad and
+  param1 = 1 for the right one; the two references share state.
+
+compatible: "zmk,input-processor-dual-pad"
+
+include: ip_one_param.yaml
+
+properties:
+  touch-code:
+    type: int
+    default: 264
+    description: Key code each half reports while its pad is being touched (264 = INPUT_BTN_8).
+
+  scroll-start:
+    type: int
+    default: 30
+    description: Shared movement, in device counts, before the gesture is treated as a scroll.
+
+  zoom-start:
+    type: int
+    default: 60
+    description: Separation between the two fingers, in device counts, before it is a zoom.
+
+  scroll-divisor:
+    type: int
+    default: 16
+    description: Device counts per unit of scroll output.
+
+  zoom-divisor:
+    type: int
+    default: 24
+    description: Device counts of separation per unit of zoom output.
+
+  invert-scroll:
+    type: boolean
+    description: Flip the scroll direction.
+
+  invert-zoom:
+    type: boolean
+    description: Flip which way pinching in and out zooms.
+
+  bindings:
+    type: phandle-array
+    description: |
+      Behavior held down while zooming, so the host turns the wheel output
+      into zoom - typically &kp LGUI on macOS or &kp LCTRL elsewhere.
