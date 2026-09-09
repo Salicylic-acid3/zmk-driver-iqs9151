@@ -59,6 +59,20 @@ struct dual_pad_data {
 
 static inline int32_t dual_pad_abs(int32_t v) { return v < 0 ? -v : v; }
 
+/*
+ * Suppress an event without dropping it. Returning STOP would take the event's
+ * sync flag with it, and the listener only pushes the report it has been
+ * accumulating when it sees sync - so a suppressed sync event would strand the
+ * wheel value built from the events before it, and scrolling would stall after
+ * a notch or two. INPUT_REL_MISC is a code the listener ignores, so the value
+ * goes nowhere while the sync flag still arrives.
+ */
+static int dual_pad_swallow(struct input_event *event) {
+    event->code = INPUT_REL_MISC;
+    event->value = 0;
+    return ZMK_INPUT_PROC_CONTINUE;
+}
+
 static void dual_pad_set_zoom_modifier(const struct device *dev, const struct dual_pad_config *cfg,
                                        struct dual_pad_data *data,
                                        struct zmk_input_processor_state *state, bool pressed) {
@@ -148,14 +162,14 @@ static int dual_pad_handle_event(const struct device *dev, struct input_event *e
             data->mode = DUAL_PAD_MODE_SCROLL;
         } else {
             /* Not enough to tell yet - swallow it so the pointer stays put. */
-            return ZMK_INPUT_PROC_STOP;
+            return dual_pad_swallow(event);
         }
     }
 
     if (data->mode == DUAL_PAD_MODE_ZOOM) {
         const int32_t out = separation / (int32_t)cfg->zoom_divisor;
         if (out == 0) {
-            return ZMK_INPUT_PROC_STOP;
+            return dual_pad_swallow(event);
         }
 
         const int32_t consumed = out * (int32_t)cfg->zoom_divisor;
@@ -173,7 +187,7 @@ static int dual_pad_handle_event(const struct device *dev, struct input_event *e
     const int32_t along = vertical ? common_y : common_x;
     const int32_t out = along / (int32_t)cfg->scroll_divisor;
     if (out == 0) {
-        return ZMK_INPUT_PROC_STOP;
+        return dual_pad_swallow(event);
     }
 
     const int32_t consumed = out * (int32_t)cfg->scroll_divisor;
