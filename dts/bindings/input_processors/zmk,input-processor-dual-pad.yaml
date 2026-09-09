@@ -3,11 +3,14 @@
 description: |
   Fuses one finger on each half of a split trackpad into a single gesture.
   Reference it from both listeners with param1 = 0 for the left pad and
-  param1 = 1 for the right one; the two references share state.
+  param1 = 1 for the right one; the two references share state. param2 carries
+  flags that flip the configured directions for that reference: bit 0 inverts
+  scroll, bit 1 inverts zoom, so a listener layer override can switch
+  orientation per layer.
 
 compatible: "zmk,input-processor-dual-pad"
 
-include: ip_one_param.yaml
+include: ip_two_param.yaml
 
 properties:
   touch-code:

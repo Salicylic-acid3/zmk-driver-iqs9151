@@ -30,6 +30,15 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #define DUAL_PAD_SIDES 2
 
+/*
+ * param2 flags. The devicetree properties set the board's baseline; these flip
+ * it per reference, so a listener layer override can hand the same processor a
+ * different orientation - which is how the scroll direction follows the OS
+ * without a rebuild.
+ */
+#define DUAL_PAD_FLAG_INVERT_SCROLL BIT(0)
+#define DUAL_PAD_FLAG_INVERT_ZOOM BIT(1)
+
 enum dual_pad_mode {
     DUAL_PAD_MODE_NONE = 0,
     DUAL_PAD_MODE_SCROLL,
@@ -112,11 +121,12 @@ static void dual_pad_reset(const struct device *dev, const struct dual_pad_confi
 static int dual_pad_handle_event(const struct device *dev, struct input_event *event,
                                  uint32_t param1, uint32_t param2,
                                  struct zmk_input_processor_state *state) {
-    ARG_UNUSED(param2);
-
     const struct dual_pad_config *cfg = dev->config;
     struct dual_pad_data *data = dev->data;
     const uint8_t side = param1 ? 1 : 0;
+    const bool invert_scroll =
+        cfg->invert_scroll != ((param2 & DUAL_PAD_FLAG_INVERT_SCROLL) != 0);
+    const bool invert_zoom = cfg->invert_zoom != ((param2 & DUAL_PAD_FLAG_INVERT_ZOOM) != 0);
 
     if (event->type == INPUT_EV_KEY && event->code == cfg->touch_code) {
         const bool touched = event->value != 0;
@@ -179,7 +189,7 @@ static int dual_pad_handle_event(const struct device *dev, struct input_event *e
         dual_pad_set_zoom_modifier(dev, cfg, data, state, true);
 
         event->code = INPUT_REL_WHEEL;
-        event->value = cfg->invert_zoom ? -out : out;
+        event->value = invert_zoom ? -out : out;
         return ZMK_INPUT_PROC_CONTINUE;
     }
 
@@ -200,7 +210,7 @@ static int dual_pad_handle_event(const struct device *dev, struct input_event *e
     }
 
     event->code = vertical ? INPUT_REL_WHEEL : INPUT_REL_HWHEEL;
-    event->value = cfg->invert_scroll ? -out : out;
+    event->value = invert_scroll ? -out : out;
     return ZMK_INPUT_PROC_CONTINUE;
 }
 
