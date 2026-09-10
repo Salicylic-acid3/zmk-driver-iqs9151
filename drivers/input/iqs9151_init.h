@@ -101,9 +101,23 @@
 #define IDLE_TOUCH_MODE_SAMPLING_PERIOD_1        0x00
 #define IDLE_MODE_SAMPLING_PERIOD_0              0x32
 #define IDLE_MODE_SAMPLING_PERIOD_1              0x00
-#define LP1_MODE_SAMPLING_PERIOD_0               0x32
+/* LP1 100ms / LP2 200ms (was 50ms each, the same as Idle).
+ *
+ * LP2 is where an untouched pad lives for good: Idle->LP1 after 5s and
+ * LP1->LP2 after 40s, and nothing times out of LP2. At 50ms it kept sensing
+ * 20 times a second forever, which on 2xCR2032 is the floor of the whole
+ * keyboard's standby current -- ZMK's deep sleep stops the MCU and the radio,
+ * but this IC has no power-control GPIO and no PM hooks, so it keeps running
+ * whatever period it was left in.
+ *
+ * The mode timeouts are in seconds (0x11AE-0x11B2), not in cycles of these
+ * periods, so slowing the periods does not delay reaching LP2.
+ *
+ * The cost is wake latency: after a minute untouched, the first touch can be
+ * up to ~200ms late. Raise or lower LP2 to trade that against standby life. */
+#define LP1_MODE_SAMPLING_PERIOD_0               0x64
 #define LP1_MODE_SAMPLING_PERIOD_1               0x00
-#define LP2_MODE_SAMPLING_PERIOD_0               0x32
+#define LP2_MODE_SAMPLING_PERIOD_0               0xC8
 #define LP2_MODE_SAMPLING_PERIOD_1               0x00
 #define STATIONARY_TOUCH_TIMEOUT_0               0x0A
 #define STATIONARY_TOUCH_TIMEOUT_1               0x00
