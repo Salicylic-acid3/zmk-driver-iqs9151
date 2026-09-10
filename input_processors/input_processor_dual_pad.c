@@ -18,6 +18,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
+#include <zephyr/sys/atomic.h>
 #include <drivers/input_processor.h>
 
 #include <zephyr/logging/log.h>
@@ -59,11 +60,19 @@ struct dual_pad_config {
 };
 
 struct dual_pad_data {
+    /*
+     * The two references run in different contexts - the local pad's events
+     * arrive on the driver's work queue, the other half's come off the split
+     * link - so every access to the state below has to be serialised. Behavior
+     * invocation stays outside the lock, since it reaches the keymap and the
+     * HID stack and must not run with interrupts masked.
+     */
+    struct k_spinlock lock;
     bool touched[DUAL_PAD_SIDES];
     int32_t acc_x[DUAL_PAD_SIDES];
     int32_t acc_y[DUAL_PAD_SIDES];
     enum dual_pad_mode mode;
-    bool zoom_held;
+    atomic_t zoom_held;
 };
 
 static inline int32_t dual_pad_abs(int32_t v) { return v < 0 ? -v : v; }
@@ -85,7 +94,12 @@ static int dual_pad_swallow(struct input_event *event) {
 static void dual_pad_set_zoom_modifier(const struct device *dev, const struct dual_pad_config *cfg,
                                        struct dual_pad_data *data,
                                        struct zmk_input_processor_state *state, bool pressed) {
-    if (!cfg->has_zoom_binding || data->zoom_held == pressed) {
+    if (!cfg->has_zoom_binding) {
+        return;
+    }
+
+    /* Claim the transition, so two contexts cannot both press or both release. */
+    if (!atomic_cas(&data->zoom_held, pressed ? 0 : 1, pressed ? 1 : 0)) {
         return;
     }
 
@@ -101,16 +115,12 @@ static void dual_pad_set_zoom_modifier(const struct device *dev, const struct du
     int ret = zmk_behavior_invoke_binding(&cfg->zoom_binding, behavior_event, pressed);
     if (ret < 0) {
         LOG_WRN("Failed to %s the zoom modifier (%d)", pressed ? "press" : "release", ret);
-        return;
+        atomic_set(&data->zoom_held, pressed ? 0 : 1);
     }
-
-    data->zoom_held = pressed;
 }
 
-static void dual_pad_reset(const struct device *dev, const struct dual_pad_config *cfg,
-                           struct dual_pad_data *data, struct zmk_input_processor_state *state) {
-    dual_pad_set_zoom_modifier(dev, cfg, data, state, false);
-
+/* Caller holds the lock. */
+static void dual_pad_reset_locked(struct dual_pad_data *data) {
     data->mode = DUAL_PAD_MODE_NONE;
     for (size_t i = 0; i < DUAL_PAD_SIDES; i++) {
         data->acc_x[i] = 0;
@@ -130,13 +140,21 @@ static int dual_pad_handle_event(const struct device *dev, struct input_event *e
 
     if (event->type == INPUT_EV_KEY && event->code == cfg->touch_code) {
         const bool touched = event->value != 0;
+        bool release_modifier = false;
 
-        if (data->touched[side] != touched) {
-            data->touched[side] = touched;
-            /* Either finger leaving ends the combined gesture. */
-            if (!touched) {
-                dual_pad_reset(dev, cfg, data, state);
+        K_SPINLOCK(&data->lock) {
+            if (data->touched[side] != touched) {
+                data->touched[side] = touched;
+                /* Either finger leaving ends the combined gesture. */
+                if (!touched) {
+                    dual_pad_reset_locked(data);
+                    release_modifier = true;
+                }
             }
+        }
+
+        if (release_modifier) {
+            dual_pad_set_zoom_modifier(dev, cfg, data, state, false);
         }
 
         return ZMK_INPUT_PROC_CONTINUE;
@@ -147,71 +165,91 @@ static int dual_pad_handle_event(const struct device *dev, struct input_event *e
         return ZMK_INPUT_PROC_CONTINUE;
     }
 
+    enum { DUAL_PAD_PASS, DUAL_PAD_SWALLOW, DUAL_PAD_EMIT } action = DUAL_PAD_PASS;
+    uint16_t out_code = 0;
+    int32_t out_value = 0;
+    bool press_modifier = false;
+
+    k_spinlock_key_t key = k_spin_lock(&data->lock);
+
     /* Only one pad in use: ordinary pointer movement. */
-    if (!data->touched[0] || !data->touched[1]) {
-        return ZMK_INPUT_PROC_CONTINUE;
-    }
+    if (data->touched[0] && data->touched[1]) {
+        if (event->code == INPUT_REL_X) {
+            data->acc_x[side] += event->value;
+        } else {
+            data->acc_y[side] += event->value;
+        }
 
-    if (event->code == INPUT_REL_X) {
-        data->acc_x[side] += event->value;
-    } else {
-        data->acc_y[side] += event->value;
-    }
+        /* Movement both fingers share is a scroll; movement that separates them is a zoom. */
+        const int32_t common_x = (data->acc_x[0] + data->acc_x[1]) / 2;
+        const int32_t common_y = (data->acc_y[0] + data->acc_y[1]) / 2;
+        const int32_t separation = data->acc_x[1] - data->acc_x[0];
+        const int32_t common_max = MAX(dual_pad_abs(common_x), dual_pad_abs(common_y));
 
-    /* Movement both fingers share is a scroll; movement that separates them is a zoom. */
-    const int32_t common_x = (data->acc_x[0] + data->acc_x[1]) / 2;
-    const int32_t common_y = (data->acc_y[0] + data->acc_y[1]) / 2;
-    const int32_t separation = data->acc_x[1] - data->acc_x[0];
-    const int32_t common_max = MAX(dual_pad_abs(common_x), dual_pad_abs(common_y));
+        if (data->mode == DUAL_PAD_MODE_NONE) {
+            if (dual_pad_abs(separation) >= cfg->zoom_start &&
+                dual_pad_abs(separation) > common_max) {
+                data->mode = DUAL_PAD_MODE_ZOOM;
+            } else if (common_max >= cfg->scroll_start) {
+                data->mode = DUAL_PAD_MODE_SCROLL;
+            }
+        }
 
-    if (data->mode == DUAL_PAD_MODE_NONE) {
-        if (dual_pad_abs(separation) >= cfg->zoom_start &&
-            dual_pad_abs(separation) > common_max) {
-            data->mode = DUAL_PAD_MODE_ZOOM;
-        } else if (common_max >= cfg->scroll_start) {
-            data->mode = DUAL_PAD_MODE_SCROLL;
+        if (data->mode == DUAL_PAD_MODE_ZOOM) {
+            const int32_t out = separation / (int32_t)cfg->zoom_divisor;
+            if (out != 0) {
+                const int32_t consumed = out * (int32_t)cfg->zoom_divisor;
+                data->acc_x[1] -= consumed / 2;
+                data->acc_x[0] += consumed - (consumed / 2);
+
+                press_modifier = true;
+                out_code = INPUT_REL_WHEEL;
+                out_value = invert_zoom ? -out : out;
+                action = DUAL_PAD_EMIT;
+            } else {
+                action = DUAL_PAD_SWALLOW;
+            }
+        } else if (data->mode == DUAL_PAD_MODE_SCROLL) {
+            const bool vertical = dual_pad_abs(common_y) >= dual_pad_abs(common_x);
+            const int32_t along = vertical ? common_y : common_x;
+            const int32_t out = along / (int32_t)cfg->scroll_divisor;
+            if (out != 0) {
+                const int32_t consumed = out * (int32_t)cfg->scroll_divisor;
+                if (vertical) {
+                    data->acc_y[0] -= consumed;
+                    data->acc_y[1] -= consumed;
+                } else {
+                    data->acc_x[0] -= consumed;
+                    data->acc_x[1] -= consumed;
+                }
+
+                out_code = vertical ? INPUT_REL_WHEEL : INPUT_REL_HWHEEL;
+                out_value = invert_scroll ? -out : out;
+                action = DUAL_PAD_EMIT;
+            } else {
+                action = DUAL_PAD_SWALLOW;
+            }
         } else {
             /* Not enough to tell yet - swallow it so the pointer stays put. */
-            return dual_pad_swallow(event);
+            action = DUAL_PAD_SWALLOW;
         }
     }
 
-    if (data->mode == DUAL_PAD_MODE_ZOOM) {
-        const int32_t out = separation / (int32_t)cfg->zoom_divisor;
-        if (out == 0) {
-            return dual_pad_swallow(event);
+    k_spin_unlock(&data->lock, key);
+
+    switch (action) {
+    case DUAL_PAD_SWALLOW:
+        return dual_pad_swallow(event);
+    case DUAL_PAD_EMIT:
+        if (press_modifier) {
+            dual_pad_set_zoom_modifier(dev, cfg, data, state, true);
         }
-
-        const int32_t consumed = out * (int32_t)cfg->zoom_divisor;
-        data->acc_x[1] -= consumed / 2;
-        data->acc_x[0] += consumed - (consumed / 2);
-
-        dual_pad_set_zoom_modifier(dev, cfg, data, state, true);
-
-        event->code = INPUT_REL_WHEEL;
-        event->value = invert_zoom ? -out : out;
+        event->code = out_code;
+        event->value = out_value;
+        return ZMK_INPUT_PROC_CONTINUE;
+    default:
         return ZMK_INPUT_PROC_CONTINUE;
     }
-
-    const bool vertical = dual_pad_abs(common_y) >= dual_pad_abs(common_x);
-    const int32_t along = vertical ? common_y : common_x;
-    const int32_t out = along / (int32_t)cfg->scroll_divisor;
-    if (out == 0) {
-        return dual_pad_swallow(event);
-    }
-
-    const int32_t consumed = out * (int32_t)cfg->scroll_divisor;
-    if (vertical) {
-        data->acc_y[0] -= consumed;
-        data->acc_y[1] -= consumed;
-    } else {
-        data->acc_x[0] -= consumed;
-        data->acc_x[1] -= consumed;
-    }
-
-    event->code = vertical ? INPUT_REL_WHEEL : INPUT_REL_HWHEEL;
-    event->value = invert_scroll ? -out : out;
-    return ZMK_INPUT_PROC_CONTINUE;
 }
 
 static struct zmk_input_processor_driver_api dual_pad_driver_api = {
