@@ -14,6 +14,7 @@
 
 #include "iqs9151_init.h"
 #include "iqs9151_regs.h"
+#include "iqs9151_settings.h"
 #include "iqs9151_test.h"
 
 #include <stdbool.h>
@@ -105,17 +106,6 @@ LOG_MODULE_REGISTER(iqs9151, CONFIG_INPUT_IQS9151_LOG_LEVEL);
 #define TWO_FINGER_PINCH_WHEEL_DIV 12
 #define TWO_FINGER_PINCH_WHEEL_GAIN_X10 CONFIG_INPUT_IQS9151_2F_PINCH_WHEEL_GAIN_X10
 #define TWO_FINGER_PINCH_WHEEL_GAIN_DEN 10
-
-/*
- * Which way a pinch turns the wheel is the host's convention, not the pad's:
- * the same spread means "zoom in" on one desktop and "zoom out" on another,
- * and no amount of looking at the sensor settles it. So it is a build switch.
- */
-#if IS_ENABLED(CONFIG_INPUT_IQS9151_2F_PINCH_INVERT)
-#define IQS9151_PINCH_WHEEL_SIGN (-1)
-#else
-#define IQS9151_PINCH_WHEEL_SIGN (1)
-#endif
 
 /*
  * Swipes are classified here, on the sensor's own coordinates, before any of
@@ -239,6 +229,15 @@ struct iqs9151_two_finger_state {
     int32_t centroid_last_y;
     int32_t distance_last;
     int32_t pinch_wheel_remainder;
+    /*
+     * Sampled once, at touch-down, from the runtime settings. Reading a
+     * setting means walking the registry and comparing strings, and the
+     * arbitration that uses these runs on every frame while two fingers are
+     * down and undecided -- but a gesture that changed its mind about the
+     * rules halfway through would be worse than stale by one gesture anyway.
+     */
+    bool pinch_enabled;
+    bool pinch_invert;
     enum iqs9151_two_finger_mode mode;
 };
 struct iqs9151_two_finger_result {
@@ -1154,6 +1153,8 @@ static void iqs9151_two_finger_reset(struct iqs9151_two_finger_state *state) {
     state->centroid_last_y = 0;
     state->distance_last = 0;
     state->pinch_wheel_remainder = 0;
+    /* Not cleared: re-sampled at the next touch-down, and leaving the last
+     * known answer in place keeps a stray read between gestures harmless. */
     state->mode = IQS9151_2F_MODE_NONE;
 }
 
@@ -1346,6 +1347,8 @@ static void iqs9151_two_finger_update(struct iqs9151_data *data,
         state->centroid_dy = 0;
         state->distance_delta = 0;
         state->pinch_wheel_remainder = 0;
+        state->pinch_enabled = iqs9151_setting_one_hand_pinch();
+        state->pinch_invert = iqs9151_setting_pinch_invert();
         state->mode = IQS9151_2F_MODE_NONE;
         if (have_xy) {
             state->centroid_last_x = ((int32_t)f1x + (int32_t)f2x) / 2;
@@ -1439,7 +1442,7 @@ static void iqs9151_two_finger_update(struct iqs9151_data *data,
                 state->mode = IQS9151_2F_MODE_SCROLL;
                 result->scroll_started = true;
                 state->tap_candidate = false;
-            } else if (IS_ENABLED(CONFIG_INPUT_IQS9151_2F_PINCH_ENABLE) &&
+            } else if (state->pinch_enabled &&
                        abs_dist >= TWO_FINGER_PINCH_START_DISTANCE &&
                        (int64_t)abs_dist * 10 >
                            (int64_t)abs_center * TWO_FINGER_PINCH_DOMINANCE_X10) {
@@ -1468,7 +1471,11 @@ static void iqs9151_two_finger_update(struct iqs9151_data *data,
             state->pinch_wheel_remainder =
                 wheel_acc - (wheel * wheel_div);
             result->pinch_active = true;
-            result->pinch_wheel = (int16_t)CLAMP(wheel, INT16_MIN, INT16_MAX);
+            /* The direction is the host's convention, so it is the owner's to
+             * set; the sign goes on here rather than at the emit site because
+             * this is where the sampled setting lives. */
+            result->pinch_wheel =
+                (int16_t)CLAMP(state->pinch_invert ? -wheel : wheel, INT16_MIN, INT16_MAX);
         }
         return;
     }
@@ -2409,9 +2416,8 @@ static void iqs9151_report_frame_events(const struct device *dev,
 
     if (two_result->pinch_active) {
         if (two_result->pinch_wheel != 0) {
-            const int32_t wheel = IQS9151_PINCH_WHEEL_SIGN * (int32_t)two_result->pinch_wheel;
-            iqs9151_report_rel_event(dev, IQS9151_PINCH_WHEEL_CODE,
-                                     (int16_t)CLAMP(wheel, INT16_MIN, INT16_MAX), true, K_NO_WAIT);
+            iqs9151_report_rel_event(dev, IQS9151_PINCH_WHEEL_CODE, two_result->pinch_wheel, true,
+                                     K_NO_WAIT);
         }
     } else if (two_result->scroll_active) {
         const bool have_x = two_result->scroll_x != 0;

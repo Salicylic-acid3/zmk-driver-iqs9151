@@ -369,9 +369,41 @@ config INPUT_IQS9151_2F_PINCH_INVERT
       and closing them zooms in.
 
       Which direction is right is the host's convention rather than anything
-      about the pad, so there is no value that is correct everywhere. This is
-      a build switch: a keyboard that moves between machines whose desktops
-      disagree gets it right on one of them.
+      about the pad, so there is no value that is correct everywhere. With
+      INPUT_IQS9151_RUNTIME_SETTINGS this is only the default and the owner
+      can change it from the app; without it, it is the answer.
+
+config INPUT_IQS9151_RUNTIME_SETTINGS
+    bool "IQS9151 settings the owner can change from the app"
+    default n
+    depends on ZMK_CUSTOM_SETTINGS
+    help
+      Publish the trackpad decisions that are the user's rather than the
+      board's -- whether one-pad pinch is offered, and which way it zooms --
+      as custom settings, so they can be changed from a configurator instead
+      of by rebuilding and reflashing.
+
+      The Kconfig switches above become the defaults. A keyboard nobody has
+      touched behaves exactly as its .conf says.
+
+      On a split, enable this on BOTH halves: each half classifies gestures on
+      its own sensor and reads its own copy of the setting. The write reaches
+      both only if the client asks for every side
+      (ZMK_CUSTOM_SETTING_SOURCE_ALL), which needs
+      ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY on both halves too.
+
+config INPUT_IQS9151_RUNTIME_SETTINGS_STUDIO_RPC
+    bool "IQS9151 expose the runtime settings to Studio"
+    default y
+    depends on INPUT_IQS9151_RUNTIME_SETTINGS && ZMK_STUDIO
+    select ZMK_CUSTOM_SETTINGS_STUDIO_RPC
+    help
+      Register the trackpad as a Studio custom subsystem. There is no RPC of
+      its own, but a setting whose subsystem id matches no registered
+      subsystem is dropped from ListSettings, so without this the settings
+      exist on the keyboard and the app cannot see them.
+
+      Only the central half needs this.
 
 config INPUT_IQS9151_3F_TAP_ENABLE
     bool "IQS9151 three-finger tap enable"
