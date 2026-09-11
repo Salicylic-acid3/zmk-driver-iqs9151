@@ -325,6 +325,24 @@ config INPUT_IQS9151_2F_PINCH_START_DISTANCE
     help
       Distance-delta threshold to start 2F pinch mode (driver-side).
 
+config INPUT_IQS9151_2F_PINCH_DOMINANCE_X10
+    int "IQS9151 how decisively a pinch must beat a scroll (tenths)"
+    range 10 100
+    default 10
+    help
+      How much larger the change in the distance between the two fingers must
+      be than the distance their centroid travelled, before two fingers are
+      read as a pinch rather than a scroll. In tenths: 10 is "merely larger",
+      20 is "twice as large".
+
+      Both numbers come from the same pair of fingers. A careful scroll moves
+      the centroid and leaves the spacing alone, so 10 is enough. A hurried one
+      is not so tidy -- fingers splay a little as they travel -- and on a small
+      pad that is enough to land an intended scroll on pinch. Raising this asks
+      that the spreading be the dominant thing happening, without making a
+      deliberate pinch need a wider spread the way raising the start threshold
+      would.
+
 config INPUT_IQS9151_2F_PINCH_WHEEL_GAIN_X10
     int "IQS9151 two-finger pinch wheel gain (x10)"
     range 1 100
@@ -398,8 +416,8 @@ config INPUT_IQS9151_3F_SWIPE_THRESHOLD
     help
       Three-finger swipe threshold (driver-side).
 
-config INPUT_IQS9151_3F_SWIPE_INVERT_X
-    bool "IQS9151 invert the three-finger swipe X axis"
+config INPUT_IQS9151_SWIPE_INVERT_X
+    bool "IQS9151 invert the swipe X axis"
     default n
     help
       Swap which way a swipe along the sensor's X axis counts, so a gesture
@@ -412,15 +430,52 @@ config INPUT_IQS9151_3F_SWIPE_INVERT_X
       sees it, and a pad mounted the other way round moves the cursor
       correctly while swiping backwards. This is that correction.
 
-config INPUT_IQS9151_3F_SWIPE_INVERT_Y
-    bool "IQS9151 invert the three-finger swipe Y axis"
+config INPUT_IQS9151_SWIPE_INVERT_Y
+    bool "IQS9151 invert the swipe Y axis"
     default n
     help
-      The same for the sensor's Y axis (BTN_5 and BTN_6).
+      The same for the sensor's Y axis: the three-finger pair BTN_5/BTN_6, and
+      the two-finger horizontal swipe below.
 
       Setting both is the 180-degree case: the mirror-image half of a split,
       where the same sensor part is fitted upside down and every swipe comes
       out backwards on both axes.
+
+config INPUT_IQS9151_2F_SWIPE_ENABLE
+    bool "IQS9151 two-finger horizontal swipe"
+    default n
+    help
+      Report a decisive sideways movement of two fingers as a single key tap,
+      so the keymap can put browser back/forward -- or anything else -- on it.
+      The two directions report BTN_SIDE and BTN_EXTRA; which is which depends
+      on how the pad is mounted, so try it rather than assuming.
+
+      This costs two-finger horizontal *scroll*, and the trade is not
+      avoidable: a sideways movement cannot both start a scroll immediately and
+      be held back long enough to be recognised as a gesture. While a movement
+      is decisively sideways, scroll is not allowed to start; one that turns
+      out to be vertical after all scrolls as usual. Vertical scroll is
+      untouched.
+
+config INPUT_IQS9151_2F_SWIPE_THRESHOLD
+    int "IQS9151 two-finger horizontal swipe threshold"
+    range 1 1000
+    default 200
+    help
+      How far sideways the two fingers must travel before the swipe is
+      reported.
+
+config INPUT_IQS9151_2F_SWIPE_DOMINANCE_X10
+    int "IQS9151 how sideways a two-finger swipe must be (tenths)"
+    range 10 100
+    default 20
+    help
+      How much larger the sideways travel must be than the vertical travel for
+      a two-finger movement to count as a horizontal swipe. In tenths: 20 means
+      twice as far sideways as up or down.
+
+      This is also what keeps a slightly crooked vertical scroll out of the
+      swipe: below this ratio the movement is a scroll, whatever its length.
 
 config INPUT_IQS9151_TEST
     bool "IQS9151 test hooks"

@@ -118,28 +118,72 @@ LOG_MODULE_REGISTER(iqs9151, CONFIG_INPUT_IQS9151_LOG_LEVEL);
 #endif
 
 /*
- * Three-finger swipes are classified here, on the sensor's own coordinates,
- * before any of the listener's input processors run. That is deliberate -- a
- * swipe is one decision about a whole gesture, not a stream of deltas to be
- * transformed -- but it means the listener's XY_SWAP/X_INVERT/Y_INVERT chain,
- * which is what normally squares a rotated pad with the screen, never touches
- * it. A pad mounted the other way round therefore moves the cursor correctly
- * and swipes backwards.
+ * Swipes are classified here, on the sensor's own coordinates, before any of
+ * the listener's input processors run. That is deliberate -- a swipe is one
+ * decision about a whole gesture, not a stream of deltas to be transformed --
+ * but it means the listener's XY_SWAP/X_INVERT/Y_INVERT chain, which is what
+ * normally squares a rotated pad with the screen, never touches it. A pad
+ * mounted the other way round therefore moves the cursor correctly and swipes
+ * backwards.
  *
- * These two flip the axes for that classification only. Both set is the
- * 180-degree case: the mirror-image half of a split, whose sensor is the same
- * part fitted upside down.
+ * These two flip the axes for swipe classification only, two-finger and
+ * three-finger alike. Both set is the 180-degree case: the mirror-image half of
+ * a split, whose sensor is the same part fitted upside down.
  */
-#if IS_ENABLED(CONFIG_INPUT_IQS9151_3F_SWIPE_INVERT_X)
-#define IQS9151_3F_SWIPE_SIGN_X (-1)
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_SWIPE_INVERT_X)
+#define IQS9151_SWIPE_SIGN_X (-1)
 #else
-#define IQS9151_3F_SWIPE_SIGN_X (1)
+#define IQS9151_SWIPE_SIGN_X (1)
 #endif
-#if IS_ENABLED(CONFIG_INPUT_IQS9151_3F_SWIPE_INVERT_Y)
-#define IQS9151_3F_SWIPE_SIGN_Y (-1)
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_SWIPE_INVERT_Y)
+#define IQS9151_SWIPE_SIGN_Y (-1)
 #else
-#define IQS9151_3F_SWIPE_SIGN_Y (1)
+#define IQS9151_SWIPE_SIGN_Y (1)
 #endif
+
+/*
+ * How decisively the fingers must be spreading, rather than travelling
+ * together, before two fingers mean pinch instead of scroll.
+ *
+ * The two measurements are taken from the same pair of fingers: the centroid's
+ * travel and the change in the distance between them. A careful scroll moves
+ * the centroid and leaves the distance alone, so either test alone would do.
+ * A hurried one does not: fingers splay a little as they go, the distance
+ * creeps up, and requiring only that it creep up *more* than the centroid
+ * moved lets an untidy scroll land on pinch. Tightening the threshold instead
+ * would make a deliberate pinch need a bigger spread; this leaves the spread
+ * alone and asks that it be the dominant thing happening.
+ *
+ * Tenths, so 10 is "merely larger" and is the behaviour this replaces.
+ */
+#define TWO_FINGER_PINCH_DOMINANCE_X10 CONFIG_INPUT_IQS9151_2F_PINCH_DOMINANCE_X10
+
+/*
+ * Two-finger horizontal swipe: a discrete gesture, not a stream.
+ *
+ * "Horizontal" is the sensor's Y axis, because every listener on a board that
+ * needs this starts with XY_SWAP; see the note above about why the driver has
+ * to reason in its own coordinates.
+ *
+ * Enabling this costs two-finger horizontal *scroll*, and the trade is not
+ * hidden: a decisively sideways two-finger movement stops being able to start a
+ * scroll, because the gesture has to be allowed to finish before it can be
+ * recognised. Vertical scroll is untouched -- which is the point, since the
+ * pads this is for are small enough that a sideways flick is a deliberate act
+ * and a sideways scroll almost never is.
+ */
+#define TWO_FINGER_SWIPE_THRESHOLD CONFIG_INPUT_IQS9151_2F_SWIPE_THRESHOLD
+#define TWO_FINGER_SWIPE_DOMINANCE_X10 CONFIG_INPUT_IQS9151_2F_SWIPE_DOMINANCE_X10
+
+/*
+ * The two codes a two-finger horizontal swipe reports. Deliberately not named
+ * for a direction: which sign of the sensor's Y axis points which way on screen
+ * depends on how the pad is mounted, and the keymap decides what either one
+ * does anyway. BTN_0..BTN_7 are taken by the other gestures and BTN_8/BTN_9 by
+ * the touch state, so these are the next two that collide with nothing.
+ */
+#define IQS9151_2F_SWIPE_CODE_A INPUT_BTN_SIDE
+#define IQS9151_2F_SWIPE_CODE_B INPUT_BTN_EXTRA
 
 struct iqs9151_config {
     struct i2c_dt_spec i2c;
@@ -160,6 +204,12 @@ enum iqs9151_two_finger_mode {
     IQS9151_2F_MODE_NONE = 0,
     IQS9151_2F_MODE_SCROLL,
     IQS9151_2F_MODE_PINCH,
+    /*
+     * Entered once, when the swipe is recognised, and held until the fingers
+     * lift. The key has already been sent by then; the mode exists so the rest
+     * of the gesture cannot also become a scroll on the way out.
+     */
+    IQS9151_2F_MODE_SWIPE,
 };
 struct iqs9151_one_finger_state {
     bool active;
@@ -201,6 +251,8 @@ struct iqs9151_two_finger_result {
     int16_t scroll_x;
     int16_t scroll_y;
     int16_t pinch_wheel;
+    /* 0 when no swipe was recognised this frame, otherwise the code to tap. */
+    uint16_t swipe_code;
 };
 struct iqs9151_inertia_params {
     uint16_t interval_ms;
@@ -1356,19 +1408,41 @@ static void iqs9151_two_finger_update(struct iqs9151_data *data,
         }
 
         if (state->mode == IQS9151_2F_MODE_NONE) {
-            const int32_t abs_center =
-                MAX(iqs9151_abs32(state->centroid_dx), iqs9151_abs32(state->centroid_dy));
+            /* dy is the sensor's Y, which is the screen's horizontal here. */
+            const int32_t abs_dx = iqs9151_abs32(state->centroid_dx);
+            const int32_t abs_dy = iqs9151_abs32(state->centroid_dy);
+            const int32_t abs_center = MAX(abs_dx, abs_dy);
             const int32_t abs_dist = iqs9151_abs32(state->distance_delta);
             const bool scroll_enabled = IS_ENABLED(CONFIG_INPUT_IQS9151_SCROLL_X_ENABLE) ||
                                         IS_ENABLED(CONFIG_INPUT_IQS9151_SCROLL_Y_ENABLE);
+            /*
+             * Sideways enough that this cannot be a scroll going slightly
+             * crooked. While it holds, scroll is not allowed to start: the
+             * swipe has to be given room to finish, and a movement that turns
+             * out to be vertical after all stops being sideways-dominant and
+             * scrolls as usual.
+             */
+            const bool sideways =
+                IS_ENABLED(CONFIG_INPUT_IQS9151_2F_SWIPE_ENABLE) &&
+                ((int64_t)abs_dy * 10 >
+                 (int64_t)abs_dx * TWO_FINGER_SWIPE_DOMINANCE_X10);
 
-            if (scroll_enabled && abs_center >= TWO_FINGER_SCROLL_START_MOVE) {
+            if (sideways && abs_dy >= TWO_FINGER_SWIPE_THRESHOLD) {
+                const int32_t swipe = IQS9151_SWIPE_SIGN_Y * state->centroid_dy;
+
+                state->mode = IQS9151_2F_MODE_SWIPE;
+                result->swipe_code =
+                    (swipe < 0) ? IQS9151_2F_SWIPE_CODE_A : IQS9151_2F_SWIPE_CODE_B;
+                state->tap_candidate = false;
+            } else if (scroll_enabled && !sideways &&
+                       abs_center >= TWO_FINGER_SCROLL_START_MOVE) {
                 state->mode = IQS9151_2F_MODE_SCROLL;
                 result->scroll_started = true;
                 state->tap_candidate = false;
             } else if (IS_ENABLED(CONFIG_INPUT_IQS9151_2F_PINCH_ENABLE) &&
                        abs_dist >= TWO_FINGER_PINCH_START_DISTANCE &&
-                       abs_dist > abs_center) {
+                       (int64_t)abs_dist * 10 >
+                           (int64_t)abs_center * TWO_FINGER_PINCH_DOMINANCE_X10) {
                 state->mode = IQS9151_2F_MODE_PINCH;
                 result->pinch_started = true;
                 state->tap_candidate = false;
@@ -1632,8 +1706,8 @@ static bool iqs9151_three_finger_update(struct iqs9151_data *data,
         }
 
         if (!data->three_swipe_sent && !data->three_hold_sent) {
-            const int32_t swipe_dx = IQS9151_3F_SWIPE_SIGN_X * data->three_dx;
-            const int32_t swipe_dy = IQS9151_3F_SWIPE_SIGN_Y * data->three_dy;
+            const int32_t swipe_dx = IQS9151_SWIPE_SIGN_X * data->three_dx;
+            const int32_t swipe_dy = IQS9151_SWIPE_SIGN_Y * data->three_dy;
 
             if (iqs9151_abs32(swipe_dx) >= CONFIG_INPUT_IQS9151_3F_SWIPE_THRESHOLD &&
                 iqs9151_abs32(swipe_dx) >= iqs9151_abs32(swipe_dy)) {
@@ -2316,6 +2390,16 @@ static void iqs9151_report_frame_events(const struct device *dev,
                                         const struct iqs9151_two_finger_result *two_result,
                                         bool cursor_moving,
                                         bool suppress_cursor_tail) {
+    /*
+     * Tapped rather than held, like the three-finger swipes: the gesture is
+     * over by the time it is recognised, so there is nothing left to hold.
+     * K_FOREVER because dropping half of a press/release pair latches the key.
+     */
+    if (two_result->swipe_code != 0U) {
+        iqs9151_report_key_event(dev, two_result->swipe_code, true, true, K_FOREVER);
+        iqs9151_report_key_event(dev, two_result->swipe_code, false, true, K_FOREVER);
+    }
+
     if (two_result->pinch_started) {
         iqs9151_report_key_event(dev, INPUT_BTN_7, true, true, K_FOREVER);
     }
