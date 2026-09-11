@@ -343,6 +343,18 @@ config INPUT_IQS9151_2F_PINCH_WHEEL_HORIZONTAL
       every wheel event, so pinch would otherwise arrive at the host as a
       horizontal scroll and never zoom.
 
+config INPUT_IQS9151_2F_PINCH_INVERT
+    bool "IQS9151 invert the two-finger pinch direction"
+    default n
+    help
+      Turn the pinch wheel the other way, so spreading the fingers zooms out
+      and closing them zooms in.
+
+      Which direction is right is the host's convention rather than anything
+      about the pad, so there is no value that is correct everywhere. This is
+      a build switch: a keyboard that moves between machines whose desktops
+      disagree gets it right on one of them.
+
 config INPUT_IQS9151_3F_TAP_ENABLE
     bool "IQS9151 three-finger tap enable"
     default y
@@ -385,6 +397,30 @@ config INPUT_IQS9151_3F_SWIPE_THRESHOLD
     default 200
     help
       Three-finger swipe threshold (driver-side).
+
+config INPUT_IQS9151_3F_SWIPE_INVERT_X
+    bool "IQS9151 invert the three-finger swipe X axis"
+    default n
+    help
+      Swap which way a swipe along the sensor's X axis counts, so a gesture
+      that reported BTN_3 reports BTN_4 and the other way round.
+
+      A swipe is classified in the driver, on the sensor's own coordinates,
+      because it is one decision about a whole gesture rather than a stream of
+      deltas. The listener's XY_SWAP / X_INVERT / Y_INVERT chain -- which is
+      what normally squares a rotated pad with the screen -- therefore never
+      sees it, and a pad mounted the other way round moves the cursor
+      correctly while swiping backwards. This is that correction.
+
+config INPUT_IQS9151_3F_SWIPE_INVERT_Y
+    bool "IQS9151 invert the three-finger swipe Y axis"
+    default n
+    help
+      The same for the sensor's Y axis (BTN_5 and BTN_6).
+
+      Setting both is the 180-degree case: the mirror-image half of a split,
+      where the same sensor part is fitted upside down and every swipe comes
+      out backwards on both axes.
 
 config INPUT_IQS9151_TEST
     bool "IQS9151 test hooks"

@@ -106,6 +106,41 @@ LOG_MODULE_REGISTER(iqs9151, CONFIG_INPUT_IQS9151_LOG_LEVEL);
 #define TWO_FINGER_PINCH_WHEEL_GAIN_X10 CONFIG_INPUT_IQS9151_2F_PINCH_WHEEL_GAIN_X10
 #define TWO_FINGER_PINCH_WHEEL_GAIN_DEN 10
 
+/*
+ * Which way a pinch turns the wheel is the host's convention, not the pad's:
+ * the same spread means "zoom in" on one desktop and "zoom out" on another,
+ * and no amount of looking at the sensor settles it. So it is a build switch.
+ */
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_2F_PINCH_INVERT)
+#define IQS9151_PINCH_WHEEL_SIGN (-1)
+#else
+#define IQS9151_PINCH_WHEEL_SIGN (1)
+#endif
+
+/*
+ * Three-finger swipes are classified here, on the sensor's own coordinates,
+ * before any of the listener's input processors run. That is deliberate -- a
+ * swipe is one decision about a whole gesture, not a stream of deltas to be
+ * transformed -- but it means the listener's XY_SWAP/X_INVERT/Y_INVERT chain,
+ * which is what normally squares a rotated pad with the screen, never touches
+ * it. A pad mounted the other way round therefore moves the cursor correctly
+ * and swipes backwards.
+ *
+ * These two flip the axes for that classification only. Both set is the
+ * 180-degree case: the mirror-image half of a split, whose sensor is the same
+ * part fitted upside down.
+ */
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_3F_SWIPE_INVERT_X)
+#define IQS9151_3F_SWIPE_SIGN_X (-1)
+#else
+#define IQS9151_3F_SWIPE_SIGN_X (1)
+#endif
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_3F_SWIPE_INVERT_Y)
+#define IQS9151_3F_SWIPE_SIGN_Y (-1)
+#else
+#define IQS9151_3F_SWIPE_SIGN_Y (1)
+#endif
+
 struct iqs9151_config {
     struct i2c_dt_spec i2c;
     struct gpio_dt_spec irq_gpio;
@@ -1597,16 +1632,19 @@ static bool iqs9151_three_finger_update(struct iqs9151_data *data,
         }
 
         if (!data->three_swipe_sent && !data->three_hold_sent) {
-            if (iqs9151_abs32(data->three_dx) >= CONFIG_INPUT_IQS9151_3F_SWIPE_THRESHOLD &&
-                iqs9151_abs32(data->three_dx) >= iqs9151_abs32(data->three_dy)) {
-                const uint16_t key = (data->three_dx < 0) ? INPUT_BTN_4 : INPUT_BTN_3;
+            const int32_t swipe_dx = IQS9151_3F_SWIPE_SIGN_X * data->three_dx;
+            const int32_t swipe_dy = IQS9151_3F_SWIPE_SIGN_Y * data->three_dy;
+
+            if (iqs9151_abs32(swipe_dx) >= CONFIG_INPUT_IQS9151_3F_SWIPE_THRESHOLD &&
+                iqs9151_abs32(swipe_dx) >= iqs9151_abs32(swipe_dy)) {
+                const uint16_t key = (swipe_dx < 0) ? INPUT_BTN_4 : INPUT_BTN_3;
                 iqs9151_report_key_event(dev, key, true, true, K_FOREVER);
                 iqs9151_report_key_event(dev, key, false, true, K_FOREVER);
                 data->three_swipe_sent = true;
                 return true;
-            } else if (iqs9151_abs32(data->three_dy) >= CONFIG_INPUT_IQS9151_3F_SWIPE_THRESHOLD &&
-                       iqs9151_abs32(data->three_dy) > iqs9151_abs32(data->three_dx)) {
-                const uint16_t key = (data->three_dy < 0) ? INPUT_BTN_5 : INPUT_BTN_6;
+            } else if (iqs9151_abs32(swipe_dy) >= CONFIG_INPUT_IQS9151_3F_SWIPE_THRESHOLD &&
+                       iqs9151_abs32(swipe_dy) > iqs9151_abs32(swipe_dx)) {
+                const uint16_t key = (swipe_dy < 0) ? INPUT_BTN_5 : INPUT_BTN_6;
                 iqs9151_report_key_event(dev, key, true, true, K_FOREVER);
                 iqs9151_report_key_event(dev, key, false, true, K_FOREVER);
                 data->three_swipe_sent = true;
@@ -2287,8 +2325,9 @@ static void iqs9151_report_frame_events(const struct device *dev,
 
     if (two_result->pinch_active) {
         if (two_result->pinch_wheel != 0) {
-            iqs9151_report_rel_event(dev, IQS9151_PINCH_WHEEL_CODE, two_result->pinch_wheel, true,
-                                     K_NO_WAIT);
+            const int32_t wheel = IQS9151_PINCH_WHEEL_SIGN * (int32_t)two_result->pinch_wheel;
+            iqs9151_report_rel_event(dev, IQS9151_PINCH_WHEEL_CODE,
+                                     (int16_t)CLAMP(wheel, INT16_MIN, INT16_MAX), true, K_NO_WAIT);
         }
     } else if (two_result->scroll_active) {
         const bool have_x = two_result->scroll_x != 0;
