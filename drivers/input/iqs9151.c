@@ -389,6 +389,15 @@ struct iqs9151_data {
     uint8_t finger_history_count;
     /* Which generation of the runtime resolution this instance has written. */
     atomic_t resolution_generation;
+    /*
+     * Set from the moment the device reports it has reset itself until its
+     * configuration has been written back. Frames are ignored throughout: the
+     * coordinates an unconfigured IQS9151 produces are not this pad's.
+     */
+    atomic_t recovering;
+    struct k_work recover_work;
+    uint32_t recover_count;
+    int64_t recover_last_ms;
 };
 
 #ifdef CONFIG_INPUT_IQS9151_TEST
@@ -2218,6 +2227,32 @@ static inline void iqs9151_set_touch_state(struct iqs9151_data *data, uint8_t fi
 }
 #endif
 
+/* Defined next to init, which is where everything it needs to redo lives. */
+static void iqs9151_request_recovery(struct iqs9151_data *data);
+
+/*
+ * The device telling us it has reset itself.
+ *
+ * SHOW_RESET means the IQS9151 restarted -- a brownout, or its own
+ * communication timeout firing because nobody serviced the window it opened --
+ * and a restarted device is back on its power-on defaults. Not only the tuning:
+ * the Rx/Tx mapping, the disabled channels and the ATI compensation that make
+ * these electrodes into *this* pad are gone too, so what it reports afterwards
+ * is not a worse version of this trackpad, it is a different one. Spurious
+ * clicks and floods of movement are what that looks like from the outside.
+ *
+ * This used to reset the driver's own bookkeeping and return, which left two
+ * things undone. The flag is only cleared by acknowledging it, so every frame
+ * after the first came back through here -- a warning per frame, the gesture
+ * state torn down per frame, and no input ever processed again. And nothing
+ * ever wrote the configuration back, so the pad stayed on its defaults until
+ * the keyboard was next power-cycled. That is why changing a resolution in the
+ * .conf could stop making any difference: the value was written at init and
+ * then thrown away by the first reset, for the rest of that boot.
+ *
+ * So: claim the recovery once, tear down the stale state once, and hand the
+ * rebuild to a thread of our own (see iqs9151_request_recovery).
+ */
 static bool iqs9151_handle_show_reset(struct iqs9151_data *data,
                                       const struct iqs9151_frame *frame) {
     const struct device *dev = data->dev;
@@ -2226,7 +2261,12 @@ static bool iqs9151_handle_show_reset(struct iqs9151_data *data,
         return false;
     }
 
-    LOG_WRN("SHOW_RESET detected: info=0x%04x", frame->info_flags);
+    if (!atomic_cas(&data->recovering, 0, 1)) {
+        /* Already rebuilding; frames until it finishes are not this pad's. */
+        return true;
+    }
+
+    LOG_WRN("SHOW_RESET detected: info=0x%04x - restoring configuration", frame->info_flags);
     iqs9151_set_touch_state(data, 0U);
     iqs9151_reset_gesture_states(data, dev, true);
     iqs9151_inertia_cancel(&data->inertia_scroll, &data->inertia_scroll_work);
@@ -2236,6 +2276,7 @@ static bool iqs9151_handle_show_reset(struct iqs9151_data *data,
     iqs9151_motion_history_reset(&data->scroll_motion_history);
     iqs9151_motion_history_reset(&data->cursor_motion_history);
     memset(&data->prev_frame, 0, sizeof(data->prev_frame));
+    iqs9151_request_recovery(data);
     return true;
 }
 
@@ -2569,6 +2610,17 @@ static void iqs9151_work_cb(struct k_work *work) {
     struct iqs9151_frame frame;
     int ret;
     const int64_t now_ms = k_uptime_get();
+
+    /*
+     * Leave the bus alone while the recovery thread is rebuilding the device.
+     * The interrupt is re-armed so RDY keeps arriving; the frames it brings are
+     * ignored until the configuration is back, because until then they describe
+     * a differently-shaped pad.
+     */
+    if (atomic_get(&data->recovering) != 0) {
+        (void)iqs9151_set_interrupt(dev, true);
+        return;
+    }
 
     ret = iqs9151_read_frame(cfg, &frame);
     if (ret != 0) {
@@ -3052,6 +3104,105 @@ static void iqs9151_apply_requested_resolution(const struct device *dev) {
     LOG_INF("Trackpad resolution set to %u x %u", x_resolution, y_resolution);
 }
 
+/*
+ * Putting the pad back together after it has reset itself.
+ *
+ * On a thread of the driver's own, deliberately. The rebuild is the same
+ * sequence init runs -- acknowledge the reset, write the settings blob, apply
+ * the overrides, re-tune ATI -- and that is seconds of I2C with sleeps in it.
+ * The frame work runs on the system work queue, and ZMK's watchdog watches that
+ * queue by feeding from a work item on it: anything that occupies it for long
+ * enough stops the feeding and the board reboots with nothing in the log to say
+ * why. A trackpad having a bad moment must not be able to do that.
+ *
+ * Rate-limited because a device that resets once often resets again, and
+ * rebuilding in a tight loop is how a recoverable fault becomes an unusable
+ * keyboard. Past the limit the pad stays down until the next reset report,
+ * which is at least honest about what is happening.
+ */
+#define IQS9151_RECOVERY_MIN_INTERVAL_MS 2000
+
+static K_THREAD_STACK_DEFINE(iqs9151_recovery_stack,
+                             CONFIG_INPUT_IQS9151_RECOVERY_STACK_SIZE);
+static struct k_work_q iqs9151_recovery_q;
+static bool iqs9151_recovery_q_started;
+
+static void iqs9151_recover_work_handler(struct k_work *work) {
+    struct iqs9151_data *data = CONTAINER_OF(work, struct iqs9151_data, recover_work);
+    const struct device *dev = data->dev;
+    int ret;
+
+    /*
+     * The owner's scale, not the built-in one, gets the last word.
+     * apply_kconfig_overrides below writes the .conf pair and re-requests it,
+     * which would quietly undo whatever was set from the app -- so remember
+     * what is wanted now and ask for it again once the rebuild is done.
+     */
+    const uint16_t wanted_x = (uint16_t)atomic_get(&iqs9151_requested_resolution_x);
+    const uint16_t wanted_y = (uint16_t)atomic_get(&iqs9151_requested_resolution_y);
+
+    data->recover_count++;
+    data->recover_last_ms = k_uptime_get();
+
+    iqs9151_wait_for_ready(dev, 500);
+
+    /* Until this is acknowledged the device keeps reporting the flag, and every
+     * frame comes back through the handler that got us here. */
+    ret = iqs9151_ack_reset(dev);
+    if (ret != 0) {
+        LOG_ERR("Could not acknowledge the trackpad's reset (%d); pad stays down", ret);
+        goto done;
+    }
+
+    iqs9151_wait_for_ready(dev, 500);
+
+    ret = iqs9151_configure(dev);
+    if (ret != 0) {
+        LOG_ERR("Could not rewrite the trackpad configuration (%d); pad stays down", ret);
+        goto done;
+    }
+
+    iqs9151_wait_for_ready(dev, 100);
+    (void)iqs9151_apply_kconfig_overrides(dev);
+
+    if (wanted_x != 0U && wanted_y != 0U) {
+        (void)iqs9151_request_resolution(wanted_x, wanted_y);
+    }
+
+    iqs9151_wait_for_ready(dev, 100);
+    ret = iqs9151_auto_tune_ati(dev);
+    if (ret != 0) {
+        LOG_WRN("ATI re-tune failed after reset (%d); carrying on with what is set", ret);
+    }
+
+    LOG_INF("Trackpad configuration restored (reset #%u)", data->recover_count);
+
+done:
+    atomic_set(&data->recovering, 0);
+    (void)iqs9151_set_interrupt(dev, true);
+}
+
+static void iqs9151_request_recovery(struct iqs9151_data *data) {
+    const int64_t now = k_uptime_get();
+
+    if (data->recover_count > 0U &&
+        (now - data->recover_last_ms) < IQS9151_RECOVERY_MIN_INTERVAL_MS) {
+        LOG_WRN("Trackpad reset again within %dms; not rebuilding this time",
+                IQS9151_RECOVERY_MIN_INTERVAL_MS);
+        data->recover_last_ms = now;
+        atomic_set(&data->recovering, 0);
+        return;
+    }
+
+    if (!iqs9151_recovery_q_started) {
+        LOG_ERR("Recovery queue is not running; trackpad stays on its defaults");
+        atomic_set(&data->recovering, 0);
+        return;
+    }
+
+    k_work_submit_to_queue(&iqs9151_recovery_q, &data->recover_work);
+}
+
 static int iqs9151_init(const struct device *dev) {
     const struct iqs9151_config *cfg = dev->config;
     struct iqs9151_data *data = dev->data;
@@ -3135,6 +3286,21 @@ static int iqs9151_init(const struct device *dev) {
     }
     LOG_DBG("ATI complete");
 
+    /*
+     * One recovery queue for every IQS9151 on this half. Started here, on the
+     * first instance to get this far, because a work queue needs a thread and
+     * a thread needs somewhere to run: doing it at init keeps the rebuild off
+     * the system work queue that ZMK's watchdog feeds from.
+     */
+    if (!iqs9151_recovery_q_started) {
+        k_work_queue_start(&iqs9151_recovery_q, iqs9151_recovery_stack,
+                           K_THREAD_STACK_SIZEOF(iqs9151_recovery_stack),
+                           CONFIG_INPUT_IQS9151_RECOVERY_THREAD_PRIORITY, NULL);
+        (void)k_thread_name_set(&iqs9151_recovery_q.thread, "iqs9151_recover");
+        iqs9151_recovery_q_started = true;
+    }
+    k_work_init(&data->recover_work, iqs9151_recover_work_handler);
+
     // Setup IRQ Call Back
     k_work_init(&data->work, iqs9151_work_cb);
     k_work_init_delayable(&data->one_finger_click_work, iqs9151_one_finger_click_work_cb);
@@ -3194,6 +3360,7 @@ void iqs9151_test_context_init(void *ctx, const struct device *dev) {
 
     memset(data, 0, sizeof(*data));
     data->dev = dev;
+    k_work_init(&data->recover_work, iqs9151_recover_work_handler);
     k_work_init(&data->work, iqs9151_work_cb);
     k_work_init_delayable(&data->one_finger_click_work, iqs9151_one_finger_click_work_cb);
     k_work_init_delayable(&data->two_finger_click_work, iqs9151_two_finger_click_work_cb);

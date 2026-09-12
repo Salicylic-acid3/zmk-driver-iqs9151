@@ -88,6 +88,31 @@ config INPUT_IQS9151_RESOLUTION_Y
       electrode array, and a ratio derived from the wrong one is wrong by
       however much those two differ.
 
+config INPUT_IQS9151_RECOVERY_STACK_SIZE
+    int "IQS9151 reset-recovery thread stack size"
+    default 1536
+    help
+      Stack for the thread that rewrites the device's configuration after the
+      device reports it has reset itself (SHOW_RESET).
+
+      It exists so that rebuild does not run on the system work queue. The
+      rebuild is the same sequence init performs -- acknowledge the reset,
+      write the settings blob in chunks, apply the overrides, re-tune ATI --
+      which is seconds of I2C with sleeps in it. ZMK's watchdog watches the
+      system work queue by feeding from a work item on it, so occupying that
+      queue for seconds reboots the keyboard with nothing in the log to explain
+      it. A trackpad having a bad moment should not be able to do that.
+
+config INPUT_IQS9151_RECOVERY_THREAD_PRIORITY
+    int "IQS9151 reset-recovery thread priority"
+    default 10
+    help
+      Cooperative-range priorities are a bad idea here: the rebuild sleeps and
+      waits on a busy device, and must never hold the CPU against the input or
+      Bluetooth work that keeps the keyboard usable. A low preemptible priority
+      is right -- the pad is already not working while this runs, so finishing
+      quickly matters less than not getting in the way.
+
 config INPUT_IQS9151_ATI_TARGETCOUNT
     int "IQS9151 ATI target count"
     range 0 1000
