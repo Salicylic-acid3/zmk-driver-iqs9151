@@ -61,3 +61,15 @@ int iqs9151_request_resolution(uint16_t x_resolution, uint16_t y_resolution);
  * @retval 0 on success, -EINVAL if either gain is zero.
  */
 int iqs9151_set_cursor_gain(uint16_t x_gain_x10, uint16_t y_gain_x10);
+
+/**
+ * Spread each report's pointer movement across this many reports.
+ *
+ * 1 is immediate. Above that, the accumulator is drained a fraction at a time,
+ * which is what keeps an amplified axis from stepping: a gain much above 1
+ * turns the device's 1, 0, 1, 0 into 2, 0, 3, 0, and this turns that back into
+ * 1, 1, 1, 1. Costs exactly that many reports of lag and no more.
+ *
+ * @retval 0 always; values below 1 are treated as 1.
+ */
+int iqs9151_set_cursor_smoothing(uint16_t reports);

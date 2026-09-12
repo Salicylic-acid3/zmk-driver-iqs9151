@@ -125,6 +125,30 @@ config INPUT_IQS9151_CURSOR_GAIN_Y_X10
       Raising one axis and lowering the other keeps the overall pointer speed
       roughly where it was while changing the balance between them.
 
+config INPUT_IQS9151_CURSOR_SMOOTHING
+    int "IQS9151 spread each report's pointer movement over this many reports"
+    range 1 8
+    default 1
+    help
+      1 emits everything immediately, which is the behaviour without this.
+      2 releases half of what is owed each report, 3 a third, and so on.
+
+      Needed once the gain is much above 1. The device reports whole counts,
+      and slowly it reports them as 1, 0, 1, 0 -- which a 2.4x gain turns into
+      2, 0, 3, 0. The distance is right and the motion is visibly stepped: the
+      gaps are still gaps and the steps are now nearly three pixels. Lowering
+      the dynamic filter does not help, because this is not filtering, it is
+      quantisation with a multiplier on it.
+
+      Draining the accumulator a fraction at a time instead of emptying it
+      turns that into 1, 1, 1, 1 -- the gaps filled from what the report before
+      did not spend. The cost is that many reports of lag and no more: at speed
+      the accumulator settles and output tracks input exactly, so the crawl is
+      smoothed without the sweep rubber-banding.
+
+      Start at 2. Higher is smoother and laggier; past 3 or 4 it starts to feel
+      detached on a pad reporting at a few hundred hertz.
+
 config INPUT_IQS9151_RECOVERY_STACK_SIZE
     int "IQS9151 reset-recovery thread stack size"
     default 1536

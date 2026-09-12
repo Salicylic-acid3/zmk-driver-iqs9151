@@ -2638,6 +2638,14 @@ static atomic_t iqs9151_cursor_gain_x_x10 =
 static atomic_t iqs9151_cursor_gain_y_x10 =
     ATOMIC_INIT(CONFIG_INPUT_IQS9151_CURSOR_GAIN_Y_X10);
 
+static atomic_t iqs9151_cursor_smoothing =
+    ATOMIC_INIT(CONFIG_INPUT_IQS9151_CURSOR_SMOOTHING);
+
+int iqs9151_set_cursor_smoothing(uint16_t reports) {
+    atomic_set(&iqs9151_cursor_smoothing, (atomic_val_t)MAX(1U, reports));
+    return 0;
+}
+
 int iqs9151_set_cursor_gain(uint16_t x_gain_x10, uint16_t y_gain_x10) {
     if (x_gain_x10 == 0U || y_gain_x10 == 0U) {
         return -EINVAL;
@@ -2648,13 +2656,40 @@ int iqs9151_set_cursor_gain(uint16_t x_gain_x10, uint16_t y_gain_x10) {
     return 0;
 }
 
-static int16_t iqs9151_scale_axis(int16_t value, int32_t gain_x10, int32_t *remainder) {
-    const int32_t scaled = ((int32_t)value * gain_x10) + *remainder;
-    const int32_t out = scaled / 10;
+/*
+ * Gain and smoothing in one pass, over an accumulator held in tenths of an
+ * output count.
+ *
+ * Gain alone is not enough once it is much above 1. The device reports whole
+ * counts, and slowly it reports them as 1, 0, 1, 0 -- which a 2.4x gain turns
+ * into 2, 0, 3, 0. The distance is right and the motion is visibly stepped,
+ * because the gaps are still gaps and the steps are now nearly three pixels.
+ * That is not the filter; it is the quantisation, amplified.
+ *
+ * So the accumulator is drained a fraction at a time instead of emptied every
+ * report, which turns 2, 0, 3, 0 into 1, 1, 1, 1 and fills the gaps from what
+ * the previous report did not spend. `spread` is how many reports to smear
+ * across: 1 empties it immediately (the old behaviour, exactly), 2 halves it
+ * each time, and so on. The cost is that much lag and no more -- at speed the
+ * accumulator settles at `spread` reports' worth and output tracks input
+ * exactly, so this smooths the crawl without rubber-banding the sweep.
+ *
+ * The floor matters as much as the fraction: once a fraction rounds to zero
+ * the accumulator would sit there forever, so anything worth a whole count
+ * emits one. That is what actually fills the gaps.
+ */
+static int16_t iqs9151_scale_axis(int16_t value, int32_t gain_x10, int32_t spread,
+                                  int32_t *pending) {
+    *pending += (int32_t)value * gain_x10;
 
-    /* Truncation is toward zero and the carry keeps the sign, so reversing
-     * direction spends the remainder instead of accumulating against it. */
-    *remainder = scaled - (out * 10);
+    int32_t out = (*pending / spread) / 10;
+    if (out == 0 && (*pending >= 10 || *pending <= -10)) {
+        out = (*pending > 0) ? 1 : -1;
+    }
+
+    /* Division truncates toward zero and the carry keeps its sign, so
+     * reversing direction spends the accumulator instead of fighting it. */
+    *pending -= out * 10;
 
     return (int16_t)CLAMP(out, INT16_MIN, INT16_MAX);
 }
@@ -2662,19 +2697,24 @@ static int16_t iqs9151_scale_axis(int16_t value, int32_t gain_x10, int32_t *rema
 static void iqs9151_apply_cursor_gain(struct iqs9151_data *data,
                                       struct iqs9151_frame *frame) {
     if (frame->finger_count == 0U) {
-        /* Nothing in flight: drop the carry rather than let it surface as a
-         * phantom pixel on the first report of the next stroke. */
+        /*
+         * Finger gone: drop what is owed rather than glide on for a few
+         * reports. A pointer that keeps moving after you lift is worse than
+         * one that stops a pixel short.
+         */
         data->cursor_gain_remainder_x = 0;
         data->cursor_gain_remainder_y = 0;
         return;
     }
 
+    const int32_t spread = MAX(1, (int32_t)atomic_get(&iqs9151_cursor_smoothing));
+
     frame->rel_x = iqs9151_scale_axis(frame->rel_x,
                                       (int32_t)atomic_get(&iqs9151_cursor_gain_x_x10),
-                                      &data->cursor_gain_remainder_x);
+                                      spread, &data->cursor_gain_remainder_x);
     frame->rel_y = iqs9151_scale_axis(frame->rel_y,
                                       (int32_t)atomic_get(&iqs9151_cursor_gain_y_x10),
-                                      &data->cursor_gain_remainder_y);
+                                      spread, &data->cursor_gain_remainder_y);
 }
 
 static void iqs9151_work_cb(struct k_work *work) {

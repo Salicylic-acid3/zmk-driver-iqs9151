@@ -76,6 +76,11 @@
 #define IQS9151_SETTING_CURSOR_GAIN_X_KEY "cursor_gain_x"
 #define IQS9151_SETTING_CURSOR_GAIN_Y_KEY "cursor_gain_y"
 
+/* Reports to spread each movement across; 1 is immediate. See
+ * INPUT_IQS9151_CURSOR_SMOOTHING -- it is the companion to the gains, because
+ * amplifying a quantised axis is what makes it step. */
+#define IQS9151_SETTING_CURSOR_SMOOTHING_KEY "cursor_smoothing"
+
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_RUNTIME_SETTINGS)
 
 bool iqs9151_setting_one_hand_pinch(void);

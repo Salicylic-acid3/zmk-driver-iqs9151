@@ -112,6 +112,13 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
     ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
     ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_INT32(1, 200));
 
+ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
+    iqs9151_cursor_smoothing, IQS9151_SETTINGS_SUBSYSTEM_ID,
+    IQS9151_SETTING_CURSOR_SMOOTHING_KEY, ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+    ZMK_CUSTOM_SETTING_VALUE_INT32(CONFIG_INPUT_IQS9151_CURSOR_SMOOTHING),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_INT32(1, 8));
+
 /*
  * Fall back to the compiled-in value on any error, rather than propagating it.
  * The caller is a gesture decision with nowhere to report a failure to, and a
@@ -178,6 +185,10 @@ static void apply_cursor_gain(void) {
     if (ret < 0) {
         LOG_WRN("Refused cursor gain %d / %d (%d)", x, y, ret);
     }
+
+    const int32_t smoothing = read_int32(IQS9151_SETTING_CURSOR_SMOOTHING_KEY,
+                                        CONFIG_INPUT_IQS9151_CURSOR_SMOOTHING);
+    (void)iqs9151_set_cursor_smoothing((uint16_t)smoothing);
 }
 
 static void apply_resolution(void) {
@@ -227,7 +238,8 @@ static int iqs9151_settings_event_listener(const zmk_event_t *eh) {
         strcmp(changed->setting->key, IQS9151_SETTING_RESOLUTION_Y_KEY) == 0) {
         apply_resolution();
     } else if (strcmp(changed->setting->key, IQS9151_SETTING_CURSOR_GAIN_X_KEY) == 0 ||
-               strcmp(changed->setting->key, IQS9151_SETTING_CURSOR_GAIN_Y_KEY) == 0) {
+               strcmp(changed->setting->key, IQS9151_SETTING_CURSOR_GAIN_Y_KEY) == 0 ||
+               strcmp(changed->setting->key, IQS9151_SETTING_CURSOR_SMOOTHING_KEY) == 0) {
         apply_cursor_gain();
     }
 
