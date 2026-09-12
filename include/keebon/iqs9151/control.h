@@ -46,3 +46,18 @@
  * @retval 0 on success, -EINVAL if either value is zero.
  */
 int iqs9151_request_resolution(uint16_t x_resolution, uint16_t y_resolution);
+
+/**
+ * Set how far the pointer travels per count, per axis, in tenths.
+ *
+ * 10 leaves an axis alone; 16 makes it 1.6x. Applied to the relative movement
+ * the device reports, with the tenths carried between reports so a fractional
+ * gain is real travel rather than rounding.
+ *
+ * This is the lever for pointer speed. The resolution pair above is the lever
+ * for the gesture arbitration, which compares absolute coordinates. They are
+ * genuinely separate on this device, which took some finding.
+ *
+ * @retval 0 on success, -EINVAL if either gain is zero.
+ */
+int iqs9151_set_cursor_gain(uint16_t x_gain_x10, uint16_t y_gain_x10);

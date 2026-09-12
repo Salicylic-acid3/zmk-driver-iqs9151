@@ -55,19 +55,19 @@ config INPUT_IQS9151_RESOLUTION_X
       Limited to 0-4095 to match the practical 12-bit trackpad
       coordinate scale used by the device configuration.
 
-      **Set these two in proportion to the pad's physical sides.** The IC
-      spreads this many counts across the whole of that axis, so counts per
-      millimetre is resolution divided by length -- and giving a long side and
-      a short side the same number of counts makes the long side slower. Not
-      subtly: an 86 x 52 mm pad given 1300 x 1200 moves the cursor 1.5x further
-      per millimetre across than along, which reads as the pointer being
-      reluctant in one direction.
+      **This is not the cursor speed knob.** Measured on real hardware, across
+      three flashes and both halves: moving X from 1300 to 1974 changed the
+      pointer not at all. The Relative X/Y the cursor is built from does not
+      come out of these registers. Use INPUT_IQS9151_CURSOR_GAIN_X_X10 for
+      pointer speed.
 
-      It is not only the cursor. Every gesture decision in this driver compares
-      the two axes in counts -- which axis a scroll is on, whether a swipe beat
-      the other direction, whether fingers spreading beat the pair travelling --
-      so mismatched counts per millimetre tilt all of them toward the denser
-      axis, and no amount of adjusting thresholds straightens that out.
+      What it does set is the range of the *absolute* finger coordinates, and
+      those are what every gesture decision in this driver compares -- which
+      axis a scroll is on, whether a swipe beat the other direction, whether
+      fingers spreading beat the pair travelling. So set the two in proportion
+      to the pad's physical sides and those comparisons mean angles; leave them
+      mismatched and all of them lean toward the denser axis, with no threshold
+      adjustment able to straighten it out.
 
       Start from the sensor's own value for the shorter side and scale the
       other by the ratio of the sides.
@@ -87,6 +87,43 @@ config INPUT_IQS9151_RESOLUTION_Y
       find the pair -- the board drawing gives the copper outline, not the
       electrode array, and a ratio derived from the wrong one is wrong by
       however much those two differ.
+
+config INPUT_IQS9151_CURSOR_GAIN_X_X10
+    int "IQS9151 cursor gain, sensor X axis (tenths)"
+    range 1 200
+    default 10
+    help
+      Multiplier applied to the relative movement the device reports on its X
+      axis, in tenths: 10 is unchanged, 16 is 1.6x.
+
+      This exists because the resolution registers do not do it. Those set the
+      range of the *absolute* finger coordinates, which is what the gesture
+      arbitration compares -- so they stay the right lever for which axis a
+      scroll is on -- but the Relative X/Y the cursor is built from does not
+      come out of them. Changing X resolution and measuring no change in cursor
+      speed is the expected result, not a broken write.
+
+      A pad longer one way than the other needs its long axis multiplied to
+      move the pointer as far for the same finger travel. On a keyboard it
+      usually wants a little more than the ratio of the sides, because the long
+      side cannot be swept end to end in one stroke the way the short one can:
+      matching millimetres still leaves that direction feeling reluctant.
+
+      Fractional gains work because the tenths are carried between reports.
+      Without that carry, a 1.6x gain on the one- and two-count reports a
+      trackpad actually sends rounds back to 1x and does nothing.
+
+config INPUT_IQS9151_CURSOR_GAIN_Y_X10
+    int "IQS9151 cursor gain, sensor Y axis (tenths)"
+    range 1 200
+    default 10
+    help
+      The same for the sensor's Y axis. Note the listener's XY_SWAP: on a pad
+      mounted like ErgoTrack's, the sensor's X is the screen's vertical and its
+      Y is the screen's horizontal.
+
+      Raising one axis and lowering the other keeps the overall pointer speed
+      roughly where it was while changing the balance between them.
 
 config INPUT_IQS9151_RECOVERY_STACK_SIZE
     int "IQS9151 reset-recovery thread stack size"

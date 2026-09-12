@@ -398,6 +398,13 @@ struct iqs9151_data {
     struct k_work recover_work;
     uint32_t recover_count;
     int64_t recover_last_ms;
+    /*
+     * Tenths carried between reports when the cursor gain is not a whole
+     * number. Without them a 1.6x gain on a stream of 1-count reports rounds
+     * to 1 every time and the axis never actually speeds up.
+     */
+    int32_t cursor_gain_remainder_x;
+    int32_t cursor_gain_remainder_y;
 };
 
 #ifdef CONFIG_INPUT_IQS9151_TEST
@@ -2603,6 +2610,73 @@ static int iqs9151_set_interrupt(const struct device *dev, const bool en);
 /* Defined below, next to the rest of the register writes. */
 static void iqs9151_apply_requested_resolution(const struct device *dev);
 
+/*
+ * Per-axis cursor gain, applied to what the device reports.
+ *
+ * The two resolution registers do not do this. They set the range of the
+ * *absolute* finger coordinates -- which is what the gesture arbitration
+ * compares, so they remain the right lever for "which axis is this scroll on"
+ * -- but the Relative X/Y the cursor is built from does not come out of them.
+ * Moving X resolution from 1300 to 1974 was measurable in none of three
+ * flashes, on either half. The value was reaching the device the whole time;
+ * the device simply was not using it for this.
+ *
+ * So the pointer's axes are squared up here, where it cannot fail to work. A
+ * pad taller than it is wide needs its long axis multiplied to move the
+ * pointer as far for the same finger travel -- and on a keyboard it wants a
+ * little more than that again, because the full 87 mm cannot be swept in one
+ * stroke the way the 53 mm can, so parity in millimetres still reads as
+ * reluctance in the hand.
+ *
+ * The remainder is the whole trick. Reports arrive one or two counts at a
+ * time, and multiplying those by 16 and dividing by 10 in integers gives 1
+ * every single time -- an axis made "faster" by nothing at all. Carrying the
+ * tenths between reports is what turns a fractional gain into real travel.
+ */
+static atomic_t iqs9151_cursor_gain_x_x10 =
+    ATOMIC_INIT(CONFIG_INPUT_IQS9151_CURSOR_GAIN_X_X10);
+static atomic_t iqs9151_cursor_gain_y_x10 =
+    ATOMIC_INIT(CONFIG_INPUT_IQS9151_CURSOR_GAIN_Y_X10);
+
+int iqs9151_set_cursor_gain(uint16_t x_gain_x10, uint16_t y_gain_x10) {
+    if (x_gain_x10 == 0U || y_gain_x10 == 0U) {
+        return -EINVAL;
+    }
+
+    atomic_set(&iqs9151_cursor_gain_x_x10, (atomic_val_t)x_gain_x10);
+    atomic_set(&iqs9151_cursor_gain_y_x10, (atomic_val_t)y_gain_x10);
+    return 0;
+}
+
+static int16_t iqs9151_scale_axis(int16_t value, int32_t gain_x10, int32_t *remainder) {
+    const int32_t scaled = ((int32_t)value * gain_x10) + *remainder;
+    const int32_t out = scaled / 10;
+
+    /* Truncation is toward zero and the carry keeps the sign, so reversing
+     * direction spends the remainder instead of accumulating against it. */
+    *remainder = scaled - (out * 10);
+
+    return (int16_t)CLAMP(out, INT16_MIN, INT16_MAX);
+}
+
+static void iqs9151_apply_cursor_gain(struct iqs9151_data *data,
+                                      struct iqs9151_frame *frame) {
+    if (frame->finger_count == 0U) {
+        /* Nothing in flight: drop the carry rather than let it surface as a
+         * phantom pixel on the first report of the next stroke. */
+        data->cursor_gain_remainder_x = 0;
+        data->cursor_gain_remainder_y = 0;
+        return;
+    }
+
+    frame->rel_x = iqs9151_scale_axis(frame->rel_x,
+                                      (int32_t)atomic_get(&iqs9151_cursor_gain_x_x10),
+                                      &data->cursor_gain_remainder_x);
+    frame->rel_y = iqs9151_scale_axis(frame->rel_y,
+                                      (int32_t)atomic_get(&iqs9151_cursor_gain_y_x10),
+                                      &data->cursor_gain_remainder_y);
+}
+
 static void iqs9151_work_cb(struct k_work *work) {
     struct iqs9151_data *data = CONTAINER_OF(work, struct iqs9151_data, work);
     const struct device *dev = data->dev;
@@ -2633,6 +2707,11 @@ static void iqs9151_work_cb(struct k_work *work) {
      * scale change takes effect from the very next report rather than halfway
      * through the gesture that asked for it. */
     iqs9151_apply_requested_resolution(dev);
+
+    /* Before anything reads the deltas. Only the cursor path uses rel_x/rel_y
+     * -- the gestures work from the absolute finger coordinates -- so this
+     * changes pointer speed and nothing else. */
+    iqs9151_apply_cursor_gain(data, &frame);
 
     iqs9151_process_frame(data, &frame, now_ms);
 

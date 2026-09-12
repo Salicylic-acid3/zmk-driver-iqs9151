@@ -64,6 +64,18 @@
 #define IQS9151_SETTING_RESOLUTION_X_KEY "resolution_x"
 #define IQS9151_SETTING_RESOLUTION_Y_KEY "resolution_y"
 
+/*
+ * How far the pointer travels per count, per axis, in tenths.
+ *
+ * Separate from the resolution pair above because on this device they are
+ * genuinely separate: the resolutions set the absolute coordinate range the
+ * gestures compare, and have no effect whatever on the relative movement the
+ * cursor is built from. That cost three flashes to establish, so it is worth
+ * writing down twice.
+ */
+#define IQS9151_SETTING_CURSOR_GAIN_X_KEY "cursor_gain_x"
+#define IQS9151_SETTING_CURSOR_GAIN_Y_KEY "cursor_gain_y"
+
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_RUNTIME_SETTINGS)
 
 bool iqs9151_setting_one_hand_pinch(void);
