@@ -2968,6 +2968,28 @@ static int iqs9151_apply_kconfig_overrides(const struct device *dev) {
         LOG_WRN("Failed to apply dynamic filter bottom beta (%d), keeping the device default", ret);
     }
 
+    /*
+     * And ask for the resolution a second time, through the deferred path.
+     *
+     * The write above happens here in init, after a wait_for_ready that is
+     * allowed to time out -- and when it does, the device is not listening, the
+     * write is NAKed, and all that comes of it is a LOG_WRN nobody sees on a
+     * keyboard with no console. The evidence says that is what has been
+     * happening: a pad whose resolution measurably did not change after the
+     * value in the .conf did.
+     *
+     * The deferred path writes from inside the frame work, which runs on RDY,
+     * so the window is not in question. Requesting it here costs one I2C word
+     * on the first frame and makes the init-time write the redundant one rather
+     * than the load-bearing one.
+     */
+    ret = iqs9151_request_resolution((uint16_t)CONFIG_INPUT_IQS9151_RESOLUTION_X,
+                                     (uint16_t)CONFIG_INPUT_IQS9151_RESOLUTION_Y);
+    if (ret < 0) {
+        LOG_WRN("Refused the built-in resolution %d x %d (%d)",
+                CONFIG_INPUT_IQS9151_RESOLUTION_X, CONFIG_INPUT_IQS9151_RESOLUTION_Y, ret);
+    }
+
     return 0;
 }
 
