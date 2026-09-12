@@ -407,6 +407,10 @@ struct iqs9151_data {
      */
     int32_t cursor_gain_remainder_x;
     int32_t cursor_gain_remainder_y;
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_MOTION_TRACE)
+    int64_t trace_last_read_ms;
+    uint16_t trace_quiet;
+#endif
 };
 
 #ifdef CONFIG_INPUT_IQS9151_TEST
@@ -2720,6 +2724,41 @@ static void iqs9151_apply_cursor_gain(struct iqs9151_data *data,
                                       spread, &data->cursor_gain_remainder_y);
 }
 
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_MOTION_TRACE)
+/*
+ * One line per frame that carries movement, as the device delivered it --
+ * before the gain, before anything decides what the frame means.
+ *
+ * Written to answer one question: when the pointer surges and stalls at a
+ * steady finger speed, is the device holding the position and releasing it in
+ * lumps, or is the driver simply not reading every frame? "+ms" is the time
+ * since the previous read of any frame; "q" is how many frames were read in
+ * between that carried nothing. Every frame read at +5 with q>0 means the
+ * device sat still and then jumped; +30 with q=0 means frames were missed and
+ * their movement arrived in one piece.
+ */
+static void iqs9151_trace_frame(struct iqs9151_data *data, const struct iqs9151_frame *frame,
+                                int64_t now_ms) {
+    const uint32_t gap = (uint32_t)(now_ms - data->trace_last_read_ms);
+    data->trace_last_read_ms = now_ms;
+
+    if (frame->finger_count == 0U) {
+        data->trace_quiet = 0;
+        return;
+    }
+
+    const bool moving = (frame->trackpad_flags & IQS9151_TP_MOVEMENT_DETECTED) != 0U;
+    if (frame->rel_x == 0 && frame->rel_y == 0 && !moving) {
+        data->trace_quiet++;
+        return;
+    }
+
+    LOG_WRN("tp +%u q%u x%u y%u r%d,%d m%u i%04x", gap, data->trace_quiet, frame->finger1_x,
+            frame->finger1_y, frame->rel_x, frame->rel_y, moving ? 1U : 0U, frame->info_flags);
+    data->trace_quiet = 0;
+}
+#endif
+
 static void iqs9151_work_cb(struct k_work *work) {
     struct iqs9151_data *data = CONTAINER_OF(work, struct iqs9151_data, work);
     const struct device *dev = data->dev;
@@ -2751,6 +2790,10 @@ static void iqs9151_work_cb(struct k_work *work) {
      * through the gesture that asked for it. */
     iqs9151_apply_requested_resolution(dev);
     iqs9151_apply_requested_filter(dev);
+
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_MOTION_TRACE)
+    iqs9151_trace_frame(data, &frame, now_ms);
+#endif
 
     /* Before anything reads the deltas. Only the cursor path uses rel_x/rel_y
      * -- the gestures work from the absolute finger coordinates -- so this
