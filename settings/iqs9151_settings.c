@@ -5,17 +5,20 @@
  */
 
 /*
- * The two trackpad settings the owner can change from the app.
+ * The trackpad settings the owner can change from the app.
  *
  * The Kconfig switches are still here; they are the defaults. A keyboard that
  * has never been touched behaves exactly as its .conf says, and the app's copy
  * of the setting only starts to matter once someone moves it.
  *
  * Reading. zmk_custom_setting_read_by_key walks the registry and compares two
- * strings, which is cheap but not free, and the arbitration that uses these
- * runs on every frame while two fingers are down and undecided. So the driver
- * samples them once per gesture, at touch-down, rather than calling in here
- * from the hot path -- see iqs9151_two_finger_update.
+ * strings, which is cheap but not free, and the arbitration that uses the two
+ * pinch switches runs on every frame while two fingers are down and undecided.
+ * So the driver samples those once per gesture, at touch-down, rather than
+ * calling in here from the hot path -- see iqs9151_two_finger_update. The
+ * resolution pair is not read on any path: it is pushed into the IC when it
+ * changes and then lives in its registers, so the gesture code sees it for
+ * free in the coordinates themselves.
  *
  * Splits. Each half runs its own copy of this driver and reads its own copy of
  * the setting, because the gesture is classified on the half that owns the
@@ -79,14 +82,14 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
     ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
     ZMK_CUSTOM_SETTING_VALUE_INT32(CONFIG_INPUT_IQS9151_RESOLUTION_X),
     ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-    ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_CONSTRAINT(200, 4095));
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_INT32(200, 4095));
 
 ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
     iqs9151_resolution_y, IQS9151_SETTINGS_SUBSYSTEM_ID, IQS9151_SETTING_RESOLUTION_Y_KEY,
     ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
     ZMK_CUSTOM_SETTING_VALUE_INT32(CONFIG_INPUT_IQS9151_RESOLUTION_Y),
     ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-    ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_CONSTRAINT(200, 4095));
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_INT32(200, 4095));
 
 /*
  * Fall back to the compiled-in value on any error, rather than propagating it.
@@ -165,9 +168,10 @@ static void apply_resolution(void) {
  * zmk_custom_setting_changed then covers every later write, including the ones
  * relayed from the other half.
  *
- * The subsystem-id comparison is by pointer first because every setting in
- * this module shares the one string literal; the strcmp is for the case where
- * the linker did not fold identical literals.
+ * Only the two resolution keys are acted on. Every write in this subsystem
+ * raises the same event, and the two pinch switches are sampled at touch-down
+ * rather than pushed anywhere, so re-writing the IC's registers when one of
+ * them is flipped would be work for nothing.
  */
 static int iqs9151_settings_event_listener(const zmk_event_t *eh) {
     if (as_zmk_custom_settings_initialized(eh) != NULL) {
