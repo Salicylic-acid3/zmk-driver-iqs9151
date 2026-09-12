@@ -83,6 +83,17 @@ LOG_MODULE_REGISTER(iqs9151, CONFIG_INPUT_IQS9151_LOG_LEVEL);
 #define THREE_FINGER_ONE_LEAD_MAX_MS 120
 #define THREE_FINGER_TWO_LEAD_MAX_MS 120
 #define IQS9151_FINGER_HISTORY_SIZE 5
+/*
+ * Per axis, because a pad is rarely square and three fingers are not a point.
+ *
+ * Three fingers line up across the short side, which leaves almost no room to
+ * travel that way before one of them runs out of pad -- while the long side has
+ * room to spare. One threshold for both means the cramped direction is the hard
+ * one, however comfortable the other feels. _Y defaults to _X, so a board that
+ * has nothing to say about this keeps the single number it always had.
+ */
+#define THREE_FINGER_SWIPE_THRESHOLD_X CONFIG_INPUT_IQS9151_3F_SWIPE_THRESHOLD
+#define THREE_FINGER_SWIPE_THRESHOLD_Y CONFIG_INPUT_IQS9151_3F_SWIPE_THRESHOLD_Y
 #define THREE_FINGER_TAP_MAX_MS CONFIG_INPUT_IQS9151_3F_TAP_MAX_MS
 #define THREE_FINGER_TAP_MOVE CONFIG_INPUT_IQS9151_3F_TAP_MOVE
 #define ONE_FINGER_TAP_MOVE CONFIG_INPUT_IQS9151_1F_TAP_MOVE
@@ -167,6 +178,27 @@ LOG_MODULE_REGISTER(iqs9151, CONFIG_INPUT_IQS9151_LOG_LEVEL);
 #define TWO_FINGER_SWIPE_DOMINANCE_X10 CONFIG_INPUT_IQS9151_2F_SWIPE_DOMINANCE_X10
 
 /*
+ * Keeping a scroll on one axis once it has picked one.
+ *
+ * A trackpad in a keyboard is not always approached square-on. Reaching for it
+ * from the home row puts the hand at an angle, and then "straight up" is a
+ * diagonal as far as the pad is concerned -- so a scroll the user means as
+ * vertical arrives as vertical-plus-a-bit-sideways, and the page drifts.
+ *
+ * So the axis is chosen once, when the scroll starts, and held for the rest of
+ * the gesture: below this ratio the movement counts as diagonal and both axes
+ * pass through as before. In tenths, and generous on purpose -- 12 is "the
+ * dominant axis is 1.2x the other", which is everything within about 40 degrees
+ * of straight. 0 turns the whole thing off.
+ *
+ * Note this compares the two axes' *counts*, which only means an angle if both
+ * axes report the same counts per millimetre. On a pad whose sides differ that
+ * is a resolution question, not a gesture one; see the note on
+ * INPUT_IQS9151_RESOLUTION_X.
+ */
+#define TWO_FINGER_SCROLL_AXIS_LOCK_X10 CONFIG_INPUT_IQS9151_2F_SCROLL_AXIS_LOCK_X10
+
+/*
  * The two codes a two-finger horizontal swipe reports. Deliberately not named
  * for a direction: which sign of the sensor's Y axis points which way on screen
  * depends on how the pad is mounted, and the keymap decides what either one
@@ -239,6 +271,14 @@ struct iqs9151_two_finger_state {
      */
     bool pinch_enabled;
     bool pinch_invert;
+    /*
+     * Which axis this scroll settled on, decided once when it started. 0 is
+     * "diagonal, let both through"; otherwise the other axis is dropped for the
+     * rest of the gesture, so a scroll meant as vertical stays vertical even
+     * when the hand is at an angle to the pad.
+     */
+    bool scroll_lock_x;
+    bool scroll_lock_y;
     enum iqs9151_two_finger_mode mode;
 };
 struct iqs9151_two_finger_result {
@@ -1154,8 +1194,11 @@ static void iqs9151_two_finger_reset(struct iqs9151_two_finger_state *state) {
     state->centroid_last_y = 0;
     state->distance_last = 0;
     state->pinch_wheel_remainder = 0;
-    /* Not cleared: re-sampled at the next touch-down, and leaving the last
-     * known answer in place keeps a stray read between gestures harmless. */
+    state->scroll_lock_x = false;
+    state->scroll_lock_y = false;
+    /* pinch_enabled/pinch_invert are not cleared: they are re-sampled at the
+     * next touch-down, and leaving the last known answer in place keeps a
+     * stray read between gestures harmless. */
     state->mode = IQS9151_2F_MODE_NONE;
 }
 
@@ -1440,6 +1483,19 @@ static void iqs9151_two_finger_update(struct iqs9151_data *data,
                 state->tap_candidate = false;
             } else if (scroll_enabled && !sideways &&
                        abs_center >= TWO_FINGER_SCROLL_START_MOVE) {
+                /*
+                 * Pick the axis now, once, and keep it. A hand reaching across
+                 * from the home row meets the pad at an angle, so a scroll the
+                 * user means as vertical arrives as a diagonal -- and letting
+                 * both axes through for the whole gesture is what makes the
+                 * page drift sideways while they scroll down.
+                 */
+                const int64_t lock = TWO_FINGER_SCROLL_AXIS_LOCK_X10;
+
+                state->scroll_lock_x =
+                    lock > 0 && (int64_t)abs_dx * 10 >= (int64_t)abs_dy * lock;
+                state->scroll_lock_y =
+                    lock > 0 && (int64_t)abs_dy * 10 >= (int64_t)abs_dx * lock;
                 state->mode = IQS9151_2F_MODE_SCROLL;
                 result->scroll_started = true;
                 state->tap_candidate = false;
@@ -1455,10 +1511,14 @@ static void iqs9151_two_finger_update(struct iqs9151_data *data,
 
         if (state->mode == IQS9151_2F_MODE_SCROLL) {
             result->scroll_active = true;
-            if (IS_ENABLED(CONFIG_INPUT_IQS9151_SCROLL_X_ENABLE)) {
+            /* Both false means the gesture was diagonal enough to be meant
+             * that way, and both axes pass through as they always did. */
+            if (IS_ENABLED(CONFIG_INPUT_IQS9151_SCROLL_X_ENABLE) &&
+                !state->scroll_lock_y) {
                 result->scroll_x = (int16_t)CLAMP(step_x, INT16_MIN, INT16_MAX);
             }
-            if (IS_ENABLED(CONFIG_INPUT_IQS9151_SCROLL_Y_ENABLE)) {
+            if (IS_ENABLED(CONFIG_INPUT_IQS9151_SCROLL_Y_ENABLE) &&
+                !state->scroll_lock_x) {
                 result->scroll_y = (int16_t)CLAMP(step_y, INT16_MIN, INT16_MAX);
             }
         } else if (state->mode == IQS9151_2F_MODE_PINCH) {
@@ -1717,14 +1777,14 @@ static bool iqs9151_three_finger_update(struct iqs9151_data *data,
             const int32_t swipe_dx = IQS9151_SWIPE_SIGN_X * data->three_dx;
             const int32_t swipe_dy = IQS9151_SWIPE_SIGN_Y * data->three_dy;
 
-            if (iqs9151_abs32(swipe_dx) >= CONFIG_INPUT_IQS9151_3F_SWIPE_THRESHOLD &&
+            if (iqs9151_abs32(swipe_dx) >= THREE_FINGER_SWIPE_THRESHOLD_X &&
                 iqs9151_abs32(swipe_dx) >= iqs9151_abs32(swipe_dy)) {
                 const uint16_t key = (swipe_dx < 0) ? INPUT_BTN_4 : INPUT_BTN_3;
                 iqs9151_report_key_event(dev, key, true, true, K_FOREVER);
                 iqs9151_report_key_event(dev, key, false, true, K_FOREVER);
                 data->three_swipe_sent = true;
                 return true;
-            } else if (iqs9151_abs32(swipe_dy) >= CONFIG_INPUT_IQS9151_3F_SWIPE_THRESHOLD &&
+            } else if (iqs9151_abs32(swipe_dy) >= THREE_FINGER_SWIPE_THRESHOLD_Y &&
                        iqs9151_abs32(swipe_dy) > iqs9151_abs32(swipe_dx)) {
                 const uint16_t key = (swipe_dy < 0) ? INPUT_BTN_5 : INPUT_BTN_6;
                 iqs9151_report_key_event(dev, key, true, true, K_FOREVER);

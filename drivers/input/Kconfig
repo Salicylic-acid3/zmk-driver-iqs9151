@@ -51,10 +51,26 @@ config INPUT_IQS9151_RESOLUTION_X
     range 0 4095
     default 2457
     help
-      X Resolution (0x11E6).
+      X Resolution (0x11E6), written to the IC at init.
       Limited to 0-4095 to match the practical 12-bit trackpad
       coordinate scale used by the device configuration.
-      Currently not applied by the driver.
+
+      **Set these two in proportion to the pad's physical sides.** The IC
+      spreads this many counts across the whole of that axis, so counts per
+      millimetre is resolution divided by length -- and giving a long side and
+      a short side the same number of counts makes the long side slower. Not
+      subtly: an 86 x 52 mm pad given 1300 x 1200 moves the cursor 1.5x further
+      per millimetre across than along, which reads as the pointer being
+      reluctant in one direction.
+
+      It is not only the cursor. Every gesture decision in this driver compares
+      the two axes in counts -- which axis a scroll is on, whether a swipe beat
+      the other direction, whether fingers spreading beat the pair travelling --
+      so mismatched counts per millimetre tilt all of them toward the denser
+      axis, and no amount of adjusting thresholds straightens that out.
+
+      Start from the sensor's own value for the shorter side and scale the
+      other by the ratio of the sides.
 
 config INPUT_IQS9151_RESOLUTION_Y
     int "IQS9151 Y resolution"
@@ -442,11 +458,27 @@ config INPUT_IQS9151_3F_TAPDRAG_GAP_MAX_MS
       for a second 3F touch (driver-side).
 
 config INPUT_IQS9151_3F_SWIPE_THRESHOLD
-    int "IQS9151 three-finger swipe threshold"
+    int "IQS9151 three-finger swipe threshold (sensor X axis)"
     range 0 1000
     default 200
     help
-      Three-finger swipe threshold (driver-side).
+      How far three fingers must travel along the sensor's X axis before the
+      movement counts as a swipe.
+
+config INPUT_IQS9151_3F_SWIPE_THRESHOLD_Y
+    int "IQS9151 three-finger swipe threshold (sensor Y axis)"
+    range 0 1000
+    default INPUT_IQS9151_3F_SWIPE_THRESHOLD
+    help
+      The same for the sensor's Y axis. Defaults to the X threshold, so a board
+      with nothing to say about this keeps the single number it always had.
+
+      Worth lowering on a pad that is much longer one way than the other. Three
+      fingers lie across the short side and take up most of it, so there is very
+      little room left to travel that way before one of them runs off the
+      sensor -- while the long side has room to spare. One threshold for both
+      makes the cramped direction the hard one no matter how comfortable the
+      other feels.
 
 config INPUT_IQS9151_SWIPE_INVERT_X
     bool "IQS9151 invert the swipe X axis"
@@ -488,6 +520,26 @@ config INPUT_IQS9151_2F_SWIPE_ENABLE
       is decisively sideways, scroll is not allowed to start; one that turns
       out to be vertical after all scrolls as usual. Vertical scroll is
       untouched.
+
+config INPUT_IQS9151_2F_SCROLL_AXIS_LOCK_X10
+    int "IQS9151 keep a two-finger scroll on the axis it started on (tenths)"
+    range 0 100
+    default 0
+    help
+      How much one axis must lead the other, when a scroll starts, for the
+      scroll to be held to that axis for the rest of the gesture. In tenths:
+      12 means "1.2x the other", which is everything within roughly 40 degrees
+      of straight. 0 disables it and both axes pass through as they always did.
+
+      A trackpad in a keyboard is not always approached square-on. Reaching for
+      it from the home row puts the hand at an angle, and then "straight up" is
+      a diagonal as far as the pad is concerned -- so a scroll meant as vertical
+      arrives as vertical-plus-a-bit-sideways and the page drifts while it
+      scrolls. Picking the axis once, at the start, is what stops that.
+
+      This compares the two axes' counts, which is only an angle if both axes
+      report the same counts per millimetre. On a pad whose sides differ that is
+      a resolution question -- see INPUT_IQS9151_RESOLUTION_X.
 
 config INPUT_IQS9151_2F_SWIPE_THRESHOLD
     int "IQS9151 two-finger horizontal swipe threshold"
