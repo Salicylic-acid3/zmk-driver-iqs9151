@@ -208,8 +208,44 @@ config INPUT_IQS9151_DYNAMIC_FILTER_BOTTOM_BETA
     range 0 255
     default 20
     help
-      XY Dynamic Filter Bottom Beta (0x11EE).
-      Currently not applied by the driver.
+      XY Dynamic Filter Bottom Beta (0x11EE): how hard the device filters the
+      coordinate while the finger is moving slower than BOTTOM_SPEED. Higher is
+      more filtering. The device's own default is 7.
+
+      With INPUT_IQS9151_RUNTIME_SETTINGS this and the four below become the
+      defaults for settings the owner can move from the app, because on a pad
+      whose axes have different electrode pitch the right values are found by
+      moving a finger and watching, not by reading a datasheet.
+
+config INPUT_IQS9151_STATIC_FILTER_BETA
+    int "IQS9151 static filter beta"
+    range 0 255
+    default 128
+    help
+      XY Static Filter Beta (0x11EF): filtering applied while the finger is
+      judged stationary. Higher is more. The device's own default is 128.
+
+config INPUT_IQS9151_STATIONARY_TOUCH_MOV_THRESHOLD
+    int "IQS9151 stationary touch movement threshold"
+    range 0 255
+    default 20
+    help
+      Stationary Touch Movement Threshold (0x11F0): movement smaller than this
+      is treated as no movement and not reported. The device's own default is
+      20.
+
+      This is the one to look at when a slow drag on a coarse axis stops on
+      each electrode and jumps to the next: below the threshold nothing is
+      reported, then everything since is reported at once. Lowering it trades
+      some rest jitter for continuous slow movement.
+
+config INPUT_IQS9151_JITTER_FILTER_DELTA
+    int "IQS9151 jitter filter delta"
+    range 0 255
+    default 5
+    help
+      Jitter Filter Delta (0x11F4): a dead band on the raw coordinate. The
+      device's own default is 5.
 
 config INPUT_IQS9151_TOUCH_STATE_ENABLE
     bool "IQS9151 raw touch state event"

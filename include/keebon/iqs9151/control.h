@@ -73,3 +73,36 @@ int iqs9151_set_cursor_gain(uint16_t x_gain_x10, uint16_t y_gain_x10);
  * @retval 0 always; values below 1 are treated as 1.
  */
 int iqs9151_set_cursor_smoothing(uint16_t reports);
+
+/**
+ * The device's own low-speed filtering, as one block.
+ *
+ * Every field maps to a register in the 0x11EA..0x11F4 run of the trackpad
+ * settings, written together from inside the communication window like the
+ * resolutions. They decide what the device does with a finger that is barely
+ * moving, which on a coarse axis is where "stops on an electrode, then jumps
+ * to the next" comes from -- and that is not something gain or smoothing
+ * downstream can put right, because the sample was never taken.
+ *
+ *   bottom_speed / top_speed   the speed band the dynamic filter ramps over
+ *   bottom_beta                filter strength below bottom_speed (higher = more)
+ *   static_beta                filter strength when the finger is still
+ *   stationary_threshold       movement below this is reported as none at all
+ *   jitter_delta               dead band on the raw coordinate
+ */
+struct iqs9151_filter_tune {
+    uint16_t bottom_speed;
+    uint16_t top_speed;
+    uint8_t bottom_beta;
+    uint8_t static_beta;
+    uint8_t stationary_threshold;
+    uint8_t jitter_delta;
+};
+
+/**
+ * Ask every IQS9151 on this half to adopt a new filter block. Applied at the
+ * next communication window, not on return.
+ *
+ * @retval 0 always.
+ */
+int iqs9151_request_filter(const struct iqs9151_filter_tune *tune);

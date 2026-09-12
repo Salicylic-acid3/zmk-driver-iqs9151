@@ -120,6 +120,31 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
     ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_INT32(1, 8));
 
 /*
+ * The device's own low-speed filtering. Six registers, six settings; the
+ * ranges are the registers' widths. Pushed to the device as one block when any
+ * of them changes -- see apply_filter.
+ */
+#define IQS9151_FILTER_SETTING(_name, _key, _default, _max)                                       \
+    ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(                                                    \
+        _name, IQS9151_SETTINGS_SUBSYSTEM_ID, _key, ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,           \
+        ZMK_CUSTOM_SETTING_VALUE_INT32(_default), ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,   \
+        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_PERMISSION_SECURE,             \
+        ZMK_CUSTOM_SETTING_RANGE_INT32(0, _max))
+
+IQS9151_FILTER_SETTING(iqs9151_filter_bottom_speed, IQS9151_SETTING_FILTER_BOTTOM_SPEED_KEY,
+                       CONFIG_INPUT_IQS9151_DYNAMIC_FILTER_BOTTOM_SPEED, 2047);
+IQS9151_FILTER_SETTING(iqs9151_filter_top_speed, IQS9151_SETTING_FILTER_TOP_SPEED_KEY,
+                       CONFIG_INPUT_IQS9151_DYNAMIC_FILTER_TOP_SPEED, 2047);
+IQS9151_FILTER_SETTING(iqs9151_filter_bottom_beta, IQS9151_SETTING_FILTER_BOTTOM_BETA_KEY,
+                       CONFIG_INPUT_IQS9151_DYNAMIC_FILTER_BOTTOM_BETA, 255);
+IQS9151_FILTER_SETTING(iqs9151_filter_static_beta, IQS9151_SETTING_FILTER_STATIC_BETA_KEY,
+                       CONFIG_INPUT_IQS9151_STATIC_FILTER_BETA, 255);
+IQS9151_FILTER_SETTING(iqs9151_stationary_threshold, IQS9151_SETTING_STATIONARY_THRESHOLD_KEY,
+                       CONFIG_INPUT_IQS9151_STATIONARY_TOUCH_MOV_THRESHOLD, 255);
+IQS9151_FILTER_SETTING(iqs9151_jitter_delta, IQS9151_SETTING_JITTER_DELTA_KEY,
+                       CONFIG_INPUT_IQS9151_JITTER_FILTER_DELTA, 255);
+
+/*
  * Fall back to the compiled-in value on any error, rather than propagating it.
  * The caller is a gesture decision with nowhere to report a failure to, and a
  * pad that behaves like its .conf says is a much better answer than a pad that
@@ -191,6 +216,26 @@ static void apply_cursor_gain(void) {
     (void)iqs9151_set_cursor_smoothing((uint16_t)smoothing);
 }
 
+static void apply_filter(void) {
+    const struct iqs9151_filter_tune tune = {
+        .bottom_speed = (uint16_t)read_int32(IQS9151_SETTING_FILTER_BOTTOM_SPEED_KEY,
+                                             CONFIG_INPUT_IQS9151_DYNAMIC_FILTER_BOTTOM_SPEED),
+        .top_speed = (uint16_t)read_int32(IQS9151_SETTING_FILTER_TOP_SPEED_KEY,
+                                          CONFIG_INPUT_IQS9151_DYNAMIC_FILTER_TOP_SPEED),
+        .bottom_beta = (uint8_t)read_int32(IQS9151_SETTING_FILTER_BOTTOM_BETA_KEY,
+                                           CONFIG_INPUT_IQS9151_DYNAMIC_FILTER_BOTTOM_BETA),
+        .static_beta = (uint8_t)read_int32(IQS9151_SETTING_FILTER_STATIC_BETA_KEY,
+                                           CONFIG_INPUT_IQS9151_STATIC_FILTER_BETA),
+        .stationary_threshold =
+            (uint8_t)read_int32(IQS9151_SETTING_STATIONARY_THRESHOLD_KEY,
+                                CONFIG_INPUT_IQS9151_STATIONARY_TOUCH_MOV_THRESHOLD),
+        .jitter_delta = (uint8_t)read_int32(IQS9151_SETTING_JITTER_DELTA_KEY,
+                                            CONFIG_INPUT_IQS9151_JITTER_FILTER_DELTA),
+    };
+
+    (void)iqs9151_request_filter(&tune);
+}
+
 static void apply_resolution(void) {
     const int32_t x = read_int32(IQS9151_SETTING_RESOLUTION_X_KEY,
                                 CONFIG_INPUT_IQS9151_RESOLUTION_X);
@@ -212,15 +257,18 @@ static void apply_resolution(void) {
  * zmk_custom_setting_changed then covers every later write, including the ones
  * relayed from the other half.
  *
- * Only the two resolution keys are acted on. Every write in this subsystem
- * raises the same event, and the two pinch switches are sampled at touch-down
- * rather than pushed anywhere, so re-writing the IC's registers when one of
- * them is flipped would be work for nothing.
+ * Only the keys that the driver has to be told about are acted on: the
+ * resolutions and the filter block go to the IC's registers, the gains and
+ * smoothing to the driver's own scaling. Every write in this subsystem raises
+ * the same event, and the two pinch switches are sampled at touch-down rather
+ * than pushed anywhere, so re-writing registers when one of them is flipped
+ * would be work for nothing.
  */
 static int iqs9151_settings_event_listener(const zmk_event_t *eh) {
     if (as_zmk_custom_settings_initialized(eh) != NULL) {
         apply_resolution();
         apply_cursor_gain();
+        apply_filter();
         return ZMK_EV_EVENT_BUBBLE;
     }
 
@@ -241,6 +289,10 @@ static int iqs9151_settings_event_listener(const zmk_event_t *eh) {
                strcmp(changed->setting->key, IQS9151_SETTING_CURSOR_GAIN_Y_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_CURSOR_SMOOTHING_KEY) == 0) {
         apply_cursor_gain();
+    } else if (strncmp(changed->setting->key, "filter_", 7) == 0 ||
+               strcmp(changed->setting->key, IQS9151_SETTING_STATIONARY_THRESHOLD_KEY) == 0 ||
+               strcmp(changed->setting->key, IQS9151_SETTING_JITTER_DELTA_KEY) == 0) {
+        apply_filter();
     }
 
     return ZMK_EV_EVENT_BUBBLE;

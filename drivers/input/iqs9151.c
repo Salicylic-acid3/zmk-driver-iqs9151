@@ -389,6 +389,8 @@ struct iqs9151_data {
     uint8_t finger_history_count;
     /* Which generation of the runtime resolution this instance has written. */
     atomic_t resolution_generation;
+    /* Same, for the low-speed filter block. */
+    atomic_t filter_generation;
     /*
      * Set from the moment the device reports it has reset itself until its
      * configuration has been written back. Frames are ignored throughout: the
@@ -2609,6 +2611,7 @@ static int iqs9151_set_interrupt(const struct device *dev, const bool en);
 
 /* Defined below, next to the rest of the register writes. */
 static void iqs9151_apply_requested_resolution(const struct device *dev);
+static void iqs9151_apply_requested_filter(const struct device *dev);
 
 /*
  * Per-axis cursor gain, applied to what the device reports.
@@ -2747,6 +2750,7 @@ static void iqs9151_work_cb(struct k_work *work) {
      * scale change takes effect from the very next report rather than halfway
      * through the gesture that asked for it. */
     iqs9151_apply_requested_resolution(dev);
+    iqs9151_apply_requested_filter(dev);
 
     /* Before anything reads the deltas. Only the cursor path uses rel_x/rel_y
      * -- the gestures work from the absolute finger coordinates -- so this
@@ -3070,6 +3074,79 @@ static int iqs9151_configure(const struct device *dev) {
 }
 
 /*
+ * The device's low-speed filter block, requested from anywhere and written
+ * from inside the communication window -- the same arrangement as the
+ * resolution, for the same reason.
+ *
+ * Six values behind one generation counter rather than six counters, because
+ * they only make sense together and because 0x11EA..0x11F0 is one contiguous
+ * run: bottom speed, top speed, bottom beta, static beta, stationary threshold.
+ * Seven bytes in one write, then the jitter delta at 0x11F4 on its own. The
+ * spinlock is for the struct copy; the generation is what the frame work
+ * compares.
+ */
+static struct iqs9151_filter_tune iqs9151_requested_filter;
+static struct k_spinlock iqs9151_filter_lock;
+static atomic_t iqs9151_filter_request_generation = ATOMIC_INIT(0);
+
+int iqs9151_request_filter(const struct iqs9151_filter_tune *tune) {
+    k_spinlock_key_t key = k_spin_lock(&iqs9151_filter_lock);
+    iqs9151_requested_filter = *tune;
+    k_spin_unlock(&iqs9151_filter_lock, key);
+    atomic_inc(&iqs9151_filter_request_generation);
+    return 0;
+}
+
+static void iqs9151_apply_requested_filter(const struct device *dev) {
+    const struct iqs9151_config *cfg = dev->config;
+    struct iqs9151_data *data = dev->data;
+
+    const atomic_val_t generation = atomic_get(&iqs9151_filter_request_generation);
+    if (generation == atomic_get(&data->filter_generation)) {
+        return;
+    }
+
+    struct iqs9151_filter_tune tune;
+    k_spinlock_key_t key = k_spin_lock(&iqs9151_filter_lock);
+    tune = iqs9151_requested_filter;
+    k_spin_unlock(&iqs9151_filter_lock, key);
+
+    uint8_t block[7];
+    sys_put_le16(tune.bottom_speed, &block[0]);
+    sys_put_le16(tune.top_speed, &block[2]);
+    block[4] = tune.bottom_beta;
+    block[5] = tune.static_beta;
+    block[6] = tune.stationary_threshold;
+
+    int ret = iqs9151_i2c_write(cfg, IQS9151_ADDR_XY_DYNAMIC_FILTER_BOTTOM_SPEED, block,
+                                sizeof(block));
+    if (ret != 0) {
+        LOG_WRN("Failed to apply filter block (%d), retrying next frame", ret);
+        return;
+    }
+
+    ret = iqs9151_i2c_write(cfg, IQS9151_ADDR_JITTER_FILTER_DELTA, &tune.jitter_delta, 1);
+    if (ret != 0) {
+        LOG_WRN("Failed to apply jitter delta (%d), retrying next frame", ret);
+        return;
+    }
+
+    atomic_set(&data->filter_generation, generation);
+    LOG_INF("Trackpad filter: speed %u..%u, beta %u/%u, stationary %u, jitter %u",
+            tune.bottom_speed, tune.top_speed, tune.bottom_beta, tune.static_beta,
+            tune.stationary_threshold, tune.jitter_delta);
+}
+
+static const struct iqs9151_filter_tune iqs9151_kconfig_filter = {
+    .bottom_speed = CONFIG_INPUT_IQS9151_DYNAMIC_FILTER_BOTTOM_SPEED,
+    .top_speed = CONFIG_INPUT_IQS9151_DYNAMIC_FILTER_TOP_SPEED,
+    .bottom_beta = CONFIG_INPUT_IQS9151_DYNAMIC_FILTER_BOTTOM_BETA,
+    .static_beta = CONFIG_INPUT_IQS9151_STATIC_FILTER_BETA,
+    .stationary_threshold = CONFIG_INPUT_IQS9151_STATIONARY_TOUCH_MOV_THRESHOLD,
+    .jitter_delta = CONFIG_INPUT_IQS9151_JITTER_FILTER_DELTA,
+};
+
+/*
  * These writes only tune the device; none of them is required for the trackpad
  * to report. A failure used to abort iqs9151_init(), which left the pad
  * completely silent - no cursor, no scroll, no gestures - for what may be a
@@ -3160,6 +3237,11 @@ static int iqs9151_apply_kconfig_overrides(const struct device *dev) {
         LOG_WRN("Refused the built-in resolution %d x %d (%d)",
                 CONFIG_INPUT_IQS9151_RESOLUTION_X, CONFIG_INPUT_IQS9151_RESOLUTION_Y, ret);
     }
+
+    /* The filter block the same way, and this is the only place the static
+     * beta, stationary threshold and jitter delta are set at all -- the direct
+     * writes above never covered them, so they stayed at the blob's values. */
+    (void)iqs9151_request_filter(&iqs9151_kconfig_filter);
 
     return 0;
 }
@@ -3259,6 +3341,12 @@ static void iqs9151_recover_work_handler(struct k_work *work) {
      */
     const uint16_t wanted_x = (uint16_t)atomic_get(&iqs9151_requested_resolution_x);
     const uint16_t wanted_y = (uint16_t)atomic_get(&iqs9151_requested_resolution_y);
+    struct iqs9151_filter_tune wanted_filter;
+    {
+        k_spinlock_key_t key = k_spin_lock(&iqs9151_filter_lock);
+        wanted_filter = iqs9151_requested_filter;
+        k_spin_unlock(&iqs9151_filter_lock, key);
+    }
 
     data->recover_count++;
     data->recover_last_ms = k_uptime_get();
@@ -3286,6 +3374,9 @@ static void iqs9151_recover_work_handler(struct k_work *work) {
 
     if (wanted_x != 0U && wanted_y != 0U) {
         (void)iqs9151_request_resolution(wanted_x, wanted_y);
+    }
+    if (wanted_filter.top_speed != 0U || wanted_filter.bottom_beta != 0U) {
+        (void)iqs9151_request_filter(&wanted_filter);
     }
 
     iqs9151_wait_for_ready(dev, 100);

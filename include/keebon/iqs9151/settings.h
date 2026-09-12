@@ -81,6 +81,19 @@
  * amplifying a quantised axis is what makes it step. */
 #define IQS9151_SETTING_CURSOR_SMOOTHING_KEY "cursor_smoothing"
 
+/*
+ * The device's own low-speed filter block, one key per register. See
+ * struct iqs9151_filter_tune in control.h for what each does. Exposed because
+ * "stops on each electrode, then jumps" on a coarse axis lives here, upstream
+ * of anything the driver can do about it afterwards.
+ */
+#define IQS9151_SETTING_FILTER_BOTTOM_SPEED_KEY "filter_bottom_speed"
+#define IQS9151_SETTING_FILTER_TOP_SPEED_KEY "filter_top_speed"
+#define IQS9151_SETTING_FILTER_BOTTOM_BETA_KEY "filter_bottom_beta"
+#define IQS9151_SETTING_FILTER_STATIC_BETA_KEY "filter_static_beta"
+#define IQS9151_SETTING_STATIONARY_THRESHOLD_KEY "stationary_threshold"
+#define IQS9151_SETTING_JITTER_DELTA_KEY "jitter_delta"
+
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_RUNTIME_SETTINGS)
 
 bool iqs9151_setting_one_hand_pinch(void);
