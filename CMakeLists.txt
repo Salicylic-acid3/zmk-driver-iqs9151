@@ -1,3 +1,8 @@
+# <keebon/iqs9151/settings.h>, which both the driver and settings/ read. Global
+# rather than per-library: the driver is part of Zephyr's input library and
+# settings/ is part of app, and this is the one line that reaches both.
+zephyr_include_directories(include)
+
 add_subdirectory(drivers)
 
 if(EXISTS "${APPLICATION_SOURCE_DIR}/include/drivers/behavior.h")

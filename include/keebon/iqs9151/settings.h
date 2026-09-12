@@ -25,10 +25,11 @@
  * The app has to write both -- see the note in settings/iqs9151_settings.c.
  *
  * This header deliberately includes nothing but Zephyr, and the code behind it
- * lives in settings/ rather than beside the driver. The driver amends Zephyr's
- * own input library, which does not have ZMK's app/include on its path and
- * cannot be given it; the first attempt put the ZMK-dependent sources there
- * and the build stopped on <zmk/event_manager.h>.
+ * lives in settings/ rather than beside the driver, compiled into `app`. The
+ * driver amends Zephyr's own input library, which has no ZMK includes; and a
+ * library of our own is not enough either, because <zmk/studio/custom.h> pulls
+ * in a header nanopb generates into the build tree, which only `app` can see.
+ * Both were learned the expensive way, one CI run each.
  */
 
 #pragma once

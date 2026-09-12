@@ -1,23 +1,23 @@
-zephyr_library()
+# Compiled into `app`, not into a zephyr_library() of our own.
+#
+# <zmk/studio/custom.h> includes <proto/zmk/custom.pb.h>, which nanopb
+# generates into the build tree during the build. That generated directory is
+# on the app target's include path and on nothing else, so a library that adds
+# ZMK's app/include by hand gets the header and then fails inside it -- which
+# is exactly what the second attempt at this did.
+#
+# Every other module here that registers a Studio subsystem (battery-report,
+# runtime-combo, runtime-macro) puts that file in `app` for the same reason.
+# Both files go there rather than one, so there is one rule instead of two:
+# `app` has every include path a ZMK module could want.
+#
+# Absolute paths: `app` is defined in another directory, so a relative one
+# would depend on CMP0076 being NEW to be resolved against this directory
+# rather than app's.
+if(CONFIG_INPUT_IQS9151_RUNTIME_SETTINGS)
+  target_sources(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/iqs9151_settings.c)
+endif()
 
-# These sources include ZMK headers, and ZMK's app/include is not on the path
-# of the Zephyr driver library the rest of this driver amends. That is why they
-# live here rather than next to iqs9151.c: the first attempt put them there and
-# the build failed on <zmk/event_manager.h>, before a board had ever been
-# flashed. Same preamble as behaviors/ and input_processors/ for the same
-# reason.
-set(_zmk_app_include_candidates
-  ${ZEPHYR_BASE}/../app/include
-  ${ZEPHYR_BASE}/../zmk/app/include
-)
-foreach(_inc ${_zmk_app_include_candidates})
-  if(EXISTS ${_inc})
-    zephyr_library_include_directories(${_inc})
-    break()
-  endif()
-endforeach()
-zephyr_library_include_directories(${CMAKE_CURRENT_LIST_DIR}/../include)
-
-zephyr_library_sources_ifdef(CONFIG_INPUT_IQS9151_RUNTIME_SETTINGS iqs9151_settings.c)
-zephyr_library_sources_ifdef(CONFIG_INPUT_IQS9151_RUNTIME_SETTINGS_STUDIO_RPC
-                             iqs9151_settings_subsystem.c)
+if(CONFIG_INPUT_IQS9151_RUNTIME_SETTINGS_STUDIO_RPC)
+  target_sources(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/iqs9151_settings_subsystem.c)
+endif()
