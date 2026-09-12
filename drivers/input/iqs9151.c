@@ -2560,8 +2560,29 @@ static void iqs9151_process_frame(struct iqs9151_data *data,
     const struct device *dev = data->dev;
     const struct iqs9151_frame prev_frame = data->prev_frame;
     struct iqs9151_two_finger_result two_result;
+    /*
+     * "Is the finger moving?" -- answered from the movement itself, not from
+     * the device's MOVEMENT_DETECTED bit.
+     *
+     * At a slow, steady drag the device keeps reporting a real -1 count per
+     * frame but toggles MOVEMENT_DETECTED off on most of them: a motion trace
+     * showed roughly fifteen frames carrying r=-1 with the bit clear for every
+     * one frame with it set. Gating the cursor on the bit alone threw those
+     * fifteen counts away and emitted the sixteenth in a lump, which is the
+     * periodic deceleration -- the pointer stalls for ~80 ms, jumps, stalls
+     * again -- that no amount of IC filtering or output smoothing could touch,
+     * because the movement was already gone before either ran.
+     *
+     * The relative registers are zero when the finger is genuinely still, so a
+     * nonzero delta with a single finger down is the honest signal. The bit is
+     * kept as an OR so a frame the device flags as moving but that happens to
+     * carry a zero delta (a direction reversal within the frame) still counts.
+     * Every consumer of this flag is already guarded by finger_count == 1.
+     */
     const bool cursor_moving =
-        (frame->trackpad_flags & IQS9151_TP_MOVEMENT_DETECTED) != 0U;
+        (frame->finger_count == 1U) &&
+        (((frame->trackpad_flags & IQS9151_TP_MOVEMENT_DETECTED) != 0U) ||
+         frame->rel_x != 0 || frame->rel_y != 0);
     bool released_from_hold;
     bool suppress_cursor_tail;
 
