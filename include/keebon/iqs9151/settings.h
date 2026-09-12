@@ -47,6 +47,23 @@
 /** That pinch turns the wheel the other way. */
 #define IQS9151_SETTING_PINCH_INVERT_KEY "pinch_invert"
 
+/*
+ * Counts spread across each axis of the pad.
+ *
+ * Runtime rather than build-time because what matters is the ratio between the
+ * two, the ratio has to match the ratio of the pad's sides, and the sides are
+ * not reliably knowable from the drawing -- the copper outline is not the
+ * electrode array, and the difference between them is easily a factor of two.
+ * Getting it wrong does not present as "the resolution is wrong". It presents
+ * as the pointer being reluctant in one direction, and as every gesture leaning
+ * the other way, because every axis decision in this driver compares counts.
+ *
+ * An evening of turning a knob settles what a week of rebuild-flash-reform-an-
+ * opinion would still be arguing about.
+ */
+#define IQS9151_SETTING_RESOLUTION_X_KEY "resolution_x"
+#define IQS9151_SETTING_RESOLUTION_Y_KEY "resolution_y"
+
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_RUNTIME_SETTINGS)
 
 bool iqs9151_setting_one_hand_pinch(void);

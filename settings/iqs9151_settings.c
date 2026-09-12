@@ -27,12 +27,16 @@
  */
 
 #include <errno.h>
+#include <string.h>
 
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 
+#include <zmk/event_manager.h>
+
 #include <cormoran/zmk/custom_settings.h>
 
+#include <keebon/iqs9151/control.h>
 #include <keebon/iqs9151/settings.h>
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
@@ -56,6 +60,33 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
     ZMK_CUSTOM_SETTING_VALUE_BOOL(IS_ENABLED(CONFIG_INPUT_IQS9151_2F_PINCH_INVERT)),
     ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
     ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+/*
+ * The pad's coordinate scale, as two numbers the owner can move.
+ *
+ * The range is the device configuration's 12-bit coordinate scale, and the
+ * floor is not 1: below a couple of hundred counts an axis has less precision
+ * than the pointer needs and the pad starts to feel like a d-pad. The Kconfig
+ * values remain the defaults, so a keyboard nobody has touched behaves exactly
+ * as its .conf says.
+ *
+ * Unlike the two switches above, these are not sampled per gesture -- they are
+ * pushed into the IC when they change and then live in its registers, so the
+ * arbitration sees them for free in the coordinates themselves.
+ */
+ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
+    iqs9151_resolution_x, IQS9151_SETTINGS_SUBSYSTEM_ID, IQS9151_SETTING_RESOLUTION_X_KEY,
+    ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+    ZMK_CUSTOM_SETTING_VALUE_INT32(CONFIG_INPUT_IQS9151_RESOLUTION_X),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_CONSTRAINT(200, 4095));
+
+ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
+    iqs9151_resolution_y, IQS9151_SETTINGS_SUBSYSTEM_ID, IQS9151_SETTING_RESOLUTION_Y_KEY,
+    ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+    ZMK_CUSTOM_SETTING_VALUE_INT32(CONFIG_INPUT_IQS9151_RESOLUTION_Y),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_CONSTRAINT(200, 4095));
 
 /*
  * Fall back to the compiled-in value on any error, rather than propagating it.
@@ -88,3 +119,80 @@ bool iqs9151_setting_pinch_invert(void) {
     return read_bool(IQS9151_SETTING_PINCH_INVERT_KEY,
                      IS_ENABLED(CONFIG_INPUT_IQS9151_2F_PINCH_INVERT));
 }
+
+static int32_t read_int32(const char *key, int32_t fallback) {
+    struct zmk_custom_setting_value value;
+    int ret = zmk_custom_setting_read_by_key(IQS9151_SETTINGS_SUBSYSTEM_ID, key, &value);
+
+    if (ret < 0) {
+        LOG_DBG("Trackpad setting %s unreadable (%d), using the built-in default", key, ret);
+        return fallback;
+    }
+    if (value.type != ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32) {
+        LOG_WRN("Trackpad setting %s is not an integer", key);
+        return fallback;
+    }
+
+    return value.int32_value;
+}
+
+/*
+ * Hand the current pair to the driver, which writes it at the IC's next
+ * communication window.
+ *
+ * Both axes go together every time, even when only one changed. The pair is
+ * one statement about the pad's shape, and writing the register that did not
+ * change costs a single I2C word inside a window that is already open.
+ */
+static void apply_resolution(void) {
+    const int32_t x = read_int32(IQS9151_SETTING_RESOLUTION_X_KEY,
+                                CONFIG_INPUT_IQS9151_RESOLUTION_X);
+    const int32_t y = read_int32(IQS9151_SETTING_RESOLUTION_Y_KEY,
+                                CONFIG_INPUT_IQS9151_RESOLUTION_Y);
+
+    int ret = iqs9151_request_resolution((uint16_t)x, (uint16_t)y);
+    if (ret < 0) {
+        LOG_WRN("Refused trackpad resolution %d x %d (%d)", x, y, ret);
+    }
+}
+
+/*
+ * Two events, one listener.
+ *
+ * zmk_custom_settings_initialized is the only safe moment to read a persisted
+ * value at boot: a plain SYS_INIT can run before settings_load has filled the
+ * registry, and would push the compiled-in default over the owner's choice.
+ * zmk_custom_setting_changed then covers every later write, including the ones
+ * relayed from the other half.
+ *
+ * The subsystem-id comparison is by pointer first because every setting in
+ * this module shares the one string literal; the strcmp is for the case where
+ * the linker did not fold identical literals.
+ */
+static int iqs9151_settings_event_listener(const zmk_event_t *eh) {
+    if (as_zmk_custom_settings_initialized(eh) != NULL) {
+        apply_resolution();
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    const struct zmk_custom_setting_changed *changed = as_zmk_custom_setting_changed(eh);
+    if (changed == NULL || changed->setting == NULL ||
+        changed->setting->custom_subsystem_id == NULL || changed->setting->key == NULL) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    if (strcmp(changed->setting->custom_subsystem_id, IQS9151_SETTINGS_SUBSYSTEM_ID) != 0) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    if (strcmp(changed->setting->key, IQS9151_SETTING_RESOLUTION_X_KEY) == 0 ||
+        strcmp(changed->setting->key, IQS9151_SETTING_RESOLUTION_Y_KEY) == 0) {
+        apply_resolution();
+    }
+
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(iqs9151_resolution_apply, iqs9151_settings_event_listener);
+ZMK_SUBSCRIPTION(iqs9151_resolution_apply, zmk_custom_settings_initialized);
+ZMK_SUBSCRIPTION(iqs9151_resolution_apply, zmk_custom_setting_changed);

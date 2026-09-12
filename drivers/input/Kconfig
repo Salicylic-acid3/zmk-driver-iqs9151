@@ -77,10 +77,16 @@ config INPUT_IQS9151_RESOLUTION_Y
     range 0 4095
     default 3072
     help
-      Y Resolution (0x11E8).
+      Y Resolution (0x11E8), written to the IC at init.
       Limited to 0-4095 to match the practical 12-bit trackpad
       coordinate scale used by the device configuration.
-      Currently not applied by the driver.
+
+      See INPUT_IQS9151_RESOLUTION_X: the two only mean anything as a pair.
+      With INPUT_IQS9151_RUNTIME_SETTINGS both become the *defaults* for a
+      setting the owner can move from the app, which is the practical way to
+      find the pair -- the board drawing gives the copper outline, not the
+      electrode array, and a ratio derived from the wrong one is wrong by
+      however much those two differ.
 
 config INPUT_IQS9151_ATI_TARGETCOUNT
     int "IQS9151 ATI target count"

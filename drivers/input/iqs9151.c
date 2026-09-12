@@ -9,9 +9,11 @@
 #include <zephyr/input/input.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
+#include <keebon/iqs9151/control.h>
 #include <keebon/iqs9151/settings.h>
 
 #include "iqs9151_init.h"
@@ -385,6 +387,8 @@ struct iqs9151_data {
     struct iqs9151_finger_history_entry finger_history[IQS9151_FINGER_HISTORY_SIZE];
     uint8_t finger_history_head;
     uint8_t finger_history_count;
+    /* Which generation of the runtime resolution this instance has written. */
+    atomic_t resolution_generation;
 };
 
 #ifdef CONFIG_INPUT_IQS9151_TEST
@@ -2555,6 +2559,9 @@ static void iqs9151_process_frame(struct iqs9151_data *data,
 
 static int iqs9151_set_interrupt(const struct device *dev, const bool en);
 
+/* Defined below, next to the rest of the register writes. */
+static void iqs9151_apply_requested_resolution(const struct device *dev);
+
 static void iqs9151_work_cb(struct k_work *work) {
     struct iqs9151_data *data = CONTAINER_OF(work, struct iqs9151_data, work);
     const struct device *dev = data->dev;
@@ -2569,6 +2576,11 @@ static void iqs9151_work_cb(struct k_work *work) {
         (void)iqs9151_set_interrupt(dev, true);
         return;
     }
+
+    /* Inside the communication window, and before the frame is acted on, so a
+     * scale change takes effect from the very next report rather than halfway
+     * through the gesture that asked for it. */
+    iqs9151_apply_requested_resolution(dev);
 
     iqs9151_process_frame(data, &frame, now_ms);
 
@@ -2957,6 +2969,65 @@ static int iqs9151_apply_kconfig_overrides(const struct device *dev) {
     }
 
     return 0;
+}
+
+/*
+ * The runtime coordinate scale: requested from anywhere, written from inside
+ * the IC's own communication window.
+ *
+ * One pair for the whole half rather than one per device, because the pair is
+ * a statement about a pad shape and every IQS9151 on a half is the same pad.
+ * The generation counter is what lets a second instance notice a request the
+ * first one has already served.
+ */
+static atomic_t iqs9151_requested_resolution_x = ATOMIC_INIT(0);
+static atomic_t iqs9151_requested_resolution_y = ATOMIC_INIT(0);
+static atomic_t iqs9151_resolution_request_generation = ATOMIC_INIT(0);
+
+int iqs9151_request_resolution(uint16_t x_resolution, uint16_t y_resolution) {
+    if (x_resolution == 0U || y_resolution == 0U) {
+        return -EINVAL;
+    }
+
+    atomic_set(&iqs9151_requested_resolution_x, (atomic_val_t)x_resolution);
+    atomic_set(&iqs9151_requested_resolution_y, (atomic_val_t)y_resolution);
+    atomic_inc(&iqs9151_resolution_request_generation);
+
+    return 0;
+}
+
+/*
+ * Called from the frame work, which runs on RDY - so the device is listening.
+ * A failed write leaves the generation unclaimed, and the next frame tries
+ * again; that is the right answer for a single dropped I2C transfer and costs
+ * nothing when there is no request outstanding.
+ */
+static void iqs9151_apply_requested_resolution(const struct device *dev) {
+    const struct iqs9151_config *cfg = dev->config;
+    struct iqs9151_data *data = dev->data;
+
+    const atomic_val_t generation = atomic_get(&iqs9151_resolution_request_generation);
+    if (generation == atomic_get(&data->resolution_generation)) {
+        return;
+    }
+
+    const uint16_t x_resolution = (uint16_t)atomic_get(&iqs9151_requested_resolution_x);
+    const uint16_t y_resolution = (uint16_t)atomic_get(&iqs9151_requested_resolution_y);
+
+    int ret = iqs9151_write_u16(cfg, IQS9151_ADDR_X_RESOLUTION, x_resolution);
+    if (ret != 0) {
+        LOG_WRN("Failed to apply X resolution %u (%d), retrying next frame", x_resolution, ret);
+        return;
+    }
+
+    ret = iqs9151_write_u16(cfg, IQS9151_ADDR_Y_RESOLUTION, y_resolution);
+    if (ret != 0) {
+        LOG_WRN("Failed to apply Y resolution %u (%d), retrying next frame", y_resolution, ret);
+        return;
+    }
+
+    atomic_set(&data->resolution_generation, generation);
+    LOG_INF("Trackpad resolution set to %u x %u", x_resolution, y_resolution);
 }
 
 static int iqs9151_init(const struct device *dev) {
