@@ -22,7 +22,13 @@
  * usable outside a ZMK build.
  *
  * On a split, each half registers its own copy and each half reads its own.
- * The app has to write both -- see the note in iqs9151_settings.c.
+ * The app has to write both -- see the note in settings/iqs9151_settings.c.
+ *
+ * This header deliberately includes nothing but Zephyr, and the code behind it
+ * lives in settings/ rather than beside the driver. The driver amends Zephyr's
+ * own input library, which does not have ZMK's app/include on its path and
+ * cannot be given it; the first attempt put the ZMK-dependent sources there
+ * and the build stopped on <zmk/event_manager.h>.
  */
 
 #pragma once

@@ -12,9 +12,10 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
+#include <keebon/iqs9151/settings.h>
+
 #include "iqs9151_init.h"
 #include "iqs9151_regs.h"
-#include "iqs9151_settings.h"
 #include "iqs9151_test.h"
 
 #include <stdbool.h>

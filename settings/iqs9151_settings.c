@@ -33,9 +33,9 @@
 
 #include <cormoran/zmk/custom_settings.h>
 
-#include "iqs9151_settings.h"
+#include <keebon/iqs9151/settings.h>
 
-LOG_MODULE_DECLARE(iqs9151, CONFIG_INPUT_IQS9151_LOG_LEVEL);
+LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /*
  * Readable while Studio is locked, writable only when unlocked -- the

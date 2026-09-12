@@ -29,7 +29,7 @@
 
 #include <zmk/studio/custom.h>
 
-LOG_MODULE_DECLARE(iqs9151, CONFIG_INPUT_IQS9151_LOG_LEVEL);
+LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /* Declared before the registration because the macro takes the handler by
  * name; defining it afterwards keeps the "why" next to the refusal. */
