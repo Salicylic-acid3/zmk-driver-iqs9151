@@ -111,6 +111,10 @@ LOG_MODULE_REGISTER(iqs9151, CONFIG_INPUT_IQS9151_LOG_LEVEL);
  * gesture for this long at fewer.
  */
 #define THREE_FINGER_FLICKER_GRACE_MS 250
+/* A first-finger position that moves further than this between two frames
+ * (5 ms) is the device renumbering its fingers, not a finger moving: at
+ * ~23 counts/mm that would be over a metre a second. */
+#define THREE_FINGER_RENUMBER_JUMP 120
 #define THREE_FINGER_TAP_MAX_MS CONFIG_INPUT_IQS9151_3F_TAP_MAX_MS
 #define THREE_FINGER_TAP_MOVE CONFIG_INPUT_IQS9151_3F_TAP_MOVE
 #define ONE_FINGER_TAP_MOVE CONFIG_INPUT_IQS9151_1F_TAP_MOVE
@@ -1999,18 +2003,23 @@ static bool iqs9151_three_finger_update(struct iqs9151_data *data,
             data->three_release_pending_ms = 0;
         }
 
-        /* The device's own relative movement of its first finger, rather than
-         * differences of that finger's absolute position: when fingers merge
-         * and split the device renumbers them, and a difference then jumps by
-         * the distance between two fingers while the relative report simply
-         * reads zero for a frame. */
-        if (frame->finger_count >= 2U) {
-            /* Not at one: a single finger's report has been through the
-             * cursor gain by now and is in different units. */
-            data->three_dx += frame->rel_x;
-            data->three_dy += frame->rel_y;
-        }
+        /* Differences of the first finger's absolute position. (The device's
+         * relative report is not an option: it is the cursor's, and reads
+         * zero with more than one finger down.) When fingers merge and split
+         * the device renumbers them, and one difference then jumps by the
+         * spacing between two fingers -- far more than a finger moves in
+         * 5 ms -- so a jump that size is a renumbering, not a swipe, and is
+         * left out. */
         if (finger1_valid) {
+            if (data->three_have_last) {
+                const int32_t dx = (int32_t)frame->finger1_x - (int32_t)data->three_last_x;
+                const int32_t dy = (int32_t)frame->finger1_y - (int32_t)data->three_last_y;
+                if (iqs9151_abs32(dx) <= THREE_FINGER_RENUMBER_JUMP &&
+                    iqs9151_abs32(dy) <= THREE_FINGER_RENUMBER_JUMP) {
+                    data->three_dx += dx;
+                    data->three_dy += dy;
+                }
+            }
             data->three_last_x = frame->finger1_x;
             data->three_last_y = frame->finger1_y;
             data->three_have_last = true;
