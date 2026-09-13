@@ -9,6 +9,9 @@
 #include <zephyr/input/input.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#if IS_ENABLED(CONFIG_SETTINGS)
+#include <zephyr/settings/settings.h>
+#endif
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
@@ -22,6 +25,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 LOG_MODULE_REGISTER(iqs9151, CONFIG_INPUT_IQS9151_LOG_LEVEL);
@@ -396,8 +400,15 @@ struct iqs9151_dist_smoother {
 #define IQS9151_RIPPLE_BINS 128
 #define IQS9151_RIPPLE_HARMONICS 4
 #define IQS9151_RIPPLE_MU_SHIFT 6      /* LMS step 1/64 */
+#define IQS9151_RIPPLE_SCAN_MU_SHIFT 9 /* the period search remembers longer: 1/512 */
 #define IQS9151_RIPPLE_NORM_EVERY 16   /* rebuild the correction table this often */
 #define IQS9151_RIPPLE_COEF_LIMIT 29491 /* 0.9 in Q15 for the fundamental */
+/* Coefficients carry eight guard bits below Q15. Without them the LMS step,
+ * floored, is short by half a unit every update, which is the same drift on
+ * every coefficient and, being the same, is a spurious wave: in simulation it
+ * pulled the period search nearly a percent high. */
+#define IQS9151_RIPPLE_COEF_GUARD 8
+#define IQS9151_RIPPLE_COEF_ONE (32768 << IQS9151_RIPPLE_COEF_GUARD)
 #define IQS9151_RIPPLE_G_FLOOR 3277     /* 0.1 in Q15: g never crosses zero */
 #define IQS9151_RIPPLE_TRACE_EVERY 128  /* log the coefficients this often (devtool) */
 #define IQS9151_RIPPLE_REF_CAP 96
@@ -424,15 +435,65 @@ struct iqs9151_ripple_ref {
     uint32_t frames; /* sum of 1 + min(idle, cap): what the window averages over */
 };
 
+/*
+ * Finding the period without being told it.
+ *
+ * The first two pads measured did not agree: one cancelled at 75.5, the
+ * other's wave would not lock to anything between 76 and 78, and the
+ * devtool log showed why -- its learned phase wandered, which is what a
+ * wrong period looks like from the inside. Every unit has its own value, to a
+ * tenth, and nobody should have to scan for it. So a bank of candidate
+ * periods learns in parallel, fundamental only, from the same samples the
+ * equaliser learns from; the one whose wave grows largest is the period,
+ * because at any other period the phase slides and the wave averages itself
+ * away. Coarse first, half a count apart across the plausible range, then a
+ * fine bank a tenth apart around the winner. The result is adopted as the
+ * live period and, since nothing else costs so little, the fine bank keeps
+ * running so the lock can follow a drift.
+ */
+#define IQS9151_RIPPLE_SCAN_MAX 29
+#define IQS9151_RIPPLE_SCAN_COARSE_MIN_X10 700
+#define IQS9151_RIPPLE_SCAN_COARSE_STEP_X10 5
+#define IQS9151_RIPPLE_SCAN_FINE_STEP_X10 1
+#define IQS9151_RIPPLE_SCAN_FINE_HALF 5        /* +/- 0.5 around the coarse winner */
+#define IQS9151_RIPPLE_SCAN_EVERY 256          /* learning steps per verdict */
+#define IQS9151_RIPPLE_SCAN_MIN_AMP 3277       /* 0.10 in Q15: below this, no wave */
+#define IQS9151_RIPPLE_SCAN_AGREE 2            /* consecutive verdicts before acting */
+#define IQS9151_RIPPLE_SCAN_HOLD_X10 4         /* a found period moves only by this much */
+#define IQS9151_RIPPLE_SCAN_REAGREE 3          /* verdicts before moving one already found */
+#define IQS9151_RIPPLE_SCAN_LOST 6             /* fine verdicts without a wave before sweeping again */
+
+enum iqs9151_ripple_scan_stage {
+    IQS9151_RIPPLE_SCAN_COARSE,
+    IQS9151_RIPPLE_SCAN_FINE,
+};
+
+struct iqs9151_ripple_scan {
+    int32_t a[IQS9151_RIPPLE_SCAN_MAX];  /* Q15+guard fundamental per candidate */
+    int32_t b[IQS9151_RIPPLE_SCAN_MAX];
+    uint16_t base_x10;                   /* candidate i is base + i * step */
+    uint16_t step_x10;
+    uint8_t count;
+    uint8_t stage;
+    uint16_t updates;
+    uint16_t last_winner_x10;            /* the previous verdict, for hysteresis */
+    uint8_t agree;
+    uint8_t lost;                        /* fine verdicts in a row with no wave */
+    uint16_t found_x10;                  /* 0 until a period has been adopted */
+    uint16_t resolution;                 /* the axis resolution this search is for */
+};
+
 struct iqs9151_ripple_eq {
-    int32_t a[IQS9151_RIPPLE_HARMONICS];     /* Q15, cosine terms */
-    int32_t b[IQS9151_RIPPLE_HARMONICS];     /* Q15, sine terms */
+    int32_t a[IQS9151_RIPPLE_HARMONICS];     /* Q15+guard, cosine terms */
+    int32_t b[IQS9151_RIPPLE_HARMONICS];     /* Q15+guard, sine terms */
     uint16_t corr[IQS9151_RIPPLE_BINS];      /* Q8 correction per phase bin */
     struct iqs9151_ripple_ref ref;           /* one-period reference average */
+    struct iqs9151_ripple_scan scan;         /* the period search */
     int32_t rem_fp;                          /* output carry, 1/256 count */
     uint16_t tick;
     uint16_t updates;                        /* learning steps since the last trace */
-    uint16_t period_x10;                     /* 0 = off */
+    uint16_t period_x10;                     /* the period in use; 0 = off */
+    bool scanning;                           /* the search is on for this axis */
 };
 
 struct iqs9151_data {
@@ -2945,8 +3006,13 @@ static const int16_t iqs9151_sin_q15[128] = {
     -12539, -11039,  -9512,  -7962,  -6393,  -4808,  -3212,  -1608,
 };
 
+/* Defined with the resolution request below; the period search watches them. */
+static atomic_t iqs9151_requested_resolution_x;
+static atomic_t iqs9151_requested_resolution_y;
+
 static atomic_t iqs9151_ripple_period_x = ATOMIC_INIT(CONFIG_INPUT_IQS9151_RIPPLE_PERIOD_X_X10);
 static atomic_t iqs9151_ripple_period_y = ATOMIC_INIT(CONFIG_INPUT_IQS9151_RIPPLE_PERIOD_Y_X10);
+static atomic_t iqs9151_ripple_auto = ATOMIC_INIT(IS_ENABLED(CONFIG_INPUT_IQS9151_RIPPLE_AUTO));
 
 int iqs9151_set_ripple_period(uint16_t x_tenths, uint16_t y_tenths) {
     if (x_tenths > IQS9151_RIPPLE_MAX_PERIOD_X10 || y_tenths > IQS9151_RIPPLE_MAX_PERIOD_X10) {
@@ -2957,7 +3023,101 @@ int iqs9151_set_ripple_period(uint16_t x_tenths, uint16_t y_tenths) {
     return 0;
 }
 
-/* Everything, including what was learned: a new period means a new wave. */
+int iqs9151_set_ripple_auto(bool enabled) {
+    atomic_set(&iqs9151_ripple_auto, enabled ? 1 : 0);
+    return 0;
+}
+
+static void iqs9151_ripple_scan_start(struct iqs9151_ripple_scan *scan, uint8_t stage,
+                                      uint16_t base_x10, uint16_t step_x10, uint8_t count) {
+    memset(scan->a, 0, sizeof(scan->a));
+    memset(scan->b, 0, sizeof(scan->b));
+    scan->stage = stage;
+    scan->base_x10 = base_x10;
+    scan->step_x10 = step_x10;
+    scan->count = MIN(count, IQS9151_RIPPLE_SCAN_MAX);
+    scan->updates = 0;
+    scan->last_winner_x10 = 0;
+    scan->agree = 0;
+    scan->lost = 0;
+}
+
+/*
+ * What the search found last time, kept across power cycles.
+ *
+ * Finding the period takes ten or twenty seconds of strokes, which is fine
+ * once and tiresome every morning. So an adopted period is written to the
+ * settings backend under iqs9151/ripple/<axis>, and at the next boot the
+ * search starts from it -- in the fine stage, so a drift of a tenth or two
+ * is still followed, but nothing has to be found again. Kept outside the
+ * device data because the settings handler runs before it knows which
+ * device it is for; one pad per half is the case this driver serves.
+ */
+static uint16_t iqs9151_ripple_remembered[2];
+
+#if IS_ENABLED(CONFIG_SETTINGS)
+static int iqs9151_ripple_settings_set(const char *name, size_t len, settings_read_cb read_cb,
+                                       void *cb_arg) {
+    const char *next;
+    int axis = -1;
+    if (settings_name_steq(name, "x", &next) && next == NULL) {
+        axis = 0;
+    } else if (settings_name_steq(name, "y", &next) && next == NULL) {
+        axis = 1;
+    }
+    if (axis < 0 || len != sizeof(uint16_t)) {
+        return -ENOENT;
+    }
+    uint16_t value;
+    if (read_cb(cb_arg, &value, sizeof(value)) != sizeof(value)) {
+        return -EIO;
+    }
+    if (value > IQS9151_RIPPLE_MAX_PERIOD_X10) {
+        return -EINVAL;
+    }
+    iqs9151_ripple_remembered[axis] = value;
+    return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(iqs9151_ripple, "iqs9151/ripple", NULL,
+                               iqs9151_ripple_settings_set, NULL, NULL);
+#endif
+
+static void iqs9151_ripple_remember(char axis, uint16_t period_x10) {
+    const int i = (axis == 'y') ? 1 : 0;
+    if (iqs9151_ripple_remembered[i] == period_x10) {
+        return;
+    }
+    iqs9151_ripple_remembered[i] = period_x10;
+#if IS_ENABLED(CONFIG_SETTINGS)
+    const int ret = settings_save_one((axis == 'y') ? "iqs9151/ripple/y" : "iqs9151/ripple/x",
+                                      &period_x10, sizeof(period_x10));
+    if (ret != 0) {
+        LOG_WRN("ripple %c: could not save period (%d)", axis, ret);
+    }
+#endif
+}
+
+static void iqs9151_ripple_scan_fine_around(struct iqs9151_ripple_scan *scan, uint16_t centre);
+
+/* Start over: from what was remembered if there is something, else the
+ * coarse sweep. */
+static void iqs9151_ripple_scan_reset(struct iqs9151_ripple_scan *scan, char axis) {
+    const uint16_t remembered = iqs9151_ripple_remembered[(axis == 'y') ? 1 : 0];
+    if (remembered >= IQS9151_RIPPLE_SCAN_COARSE_MIN_X10 + IQS9151_RIPPLE_SCAN_FINE_HALF &&
+        remembered + IQS9151_RIPPLE_SCAN_FINE_HALF <= IQS9151_RIPPLE_MAX_PERIOD_X10) {
+        iqs9151_ripple_scan_fine_around(scan, remembered);
+        scan->found_x10 = remembered;
+        return;
+    }
+    iqs9151_ripple_scan_start(scan, IQS9151_RIPPLE_SCAN_COARSE,
+                              IQS9151_RIPPLE_SCAN_COARSE_MIN_X10,
+                              IQS9151_RIPPLE_SCAN_COARSE_STEP_X10, IQS9151_RIPPLE_SCAN_MAX);
+    scan->found_x10 = 0;
+}
+
+/* The equaliser's learned wave and per-stroke state, not the period search:
+ * a new period means a new wave. */
 static void iqs9151_ripple_reset(struct iqs9151_ripple_eq *eq, uint16_t period_x10) {
     for (size_t k = 0; k < IQS9151_RIPPLE_HARMONICS; k++) {
         eq->a[k] = 0;
@@ -3061,7 +3221,7 @@ static int32_t iqs9151_ripple_g(const struct iqs9151_ripple_eq *eq, uint32_t bin
         iqs9151_ripple_basis(bin, k + 1U, &c, &s);
         sum += (int64_t)eq->a[k] * c + (int64_t)eq->b[k] * s;
     }
-    const int32_t g = 32768 + (int32_t)(sum >> 15);
+    const int32_t g = 32768 + (int32_t)(sum >> (15 + IQS9151_RIPPLE_COEF_GUARD));
     return MAX(IQS9151_RIPPLE_G_FLOOR, g);
 }
 
@@ -3083,9 +3243,216 @@ static void iqs9151_ripple_rebuild(struct iqs9151_ripple_eq *eq) {
     }
 }
 
+/* A guarded coefficient in thousandths, for the logs. */
+static int iqs9151_ripple_milli(int32_t coef) {
+    return (int)(((int64_t)coef * 1000) / IQS9151_RIPPLE_COEF_ONE);
+}
+
+static uint32_t iqs9151_isqrt(uint64_t v) {
+    uint64_t r = 0, bit = 1ULL << 62;
+    while (bit > v) {
+        bit >>= 2;
+    }
+    while (bit != 0) {
+        if (v >= r + bit) {
+            v -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+        bit >>= 2;
+    }
+    return (uint32_t)r;
+}
+
+/* mu * e * basis, into a guarded coefficient, rounded rather than floored. */
+static int32_t iqs9151_ripple_step(int32_t e, int32_t basis, int mu_shift) {
+    const int shift = 15 + mu_shift - IQS9151_RIPPLE_COEF_GUARD;
+    const int64_t prod = (int64_t)e * basis + (1LL << (shift - 1));
+    return (int32_t)(prod >> shift);
+}
+
+/* One learning step for every candidate period, fundamental only. */
+static void iqs9151_ripple_scan_learn(struct iqs9151_ripple_scan *scan, uint16_t abs_pos,
+                                      int32_t sample) {
+    for (uint32_t i = 0; i < scan->count; i++) {
+        const uint16_t period_x10 = scan->base_x10 + i * scan->step_x10;
+        const uint32_t bin = iqs9151_ripple_bin(abs_pos, period_x10);
+        int32_t c, sn;
+        iqs9151_ripple_basis(bin, 1U, &c, &sn);
+        const int32_t g =
+            32768 + (int32_t)(((int64_t)scan->a[i] * c + (int64_t)scan->b[i] * sn) >>
+                              (15 + IQS9151_RIPPLE_COEF_GUARD));
+        const int32_t e = sample - g;
+        const int32_t limit = IQS9151_RIPPLE_COEF_LIMIT << IQS9151_RIPPLE_COEF_GUARD;
+        scan->a[i] = CLAMP(scan->a[i] + iqs9151_ripple_step(e, c, IQS9151_RIPPLE_SCAN_MU_SHIFT),
+                           -limit, limit);
+        scan->b[i] = CLAMP(scan->b[i] + iqs9151_ripple_step(e, sn, IQS9151_RIPPLE_SCAN_MU_SHIFT),
+                           -limit, limit);
+    }
+}
+
+/*
+ * Where the bank's amplitude peaks, to a tenth, by fitting a parabola through
+ * the best candidate and the two `reach` steps either side of it. The top of
+ * the peak is flat -- a candidate half a count off still learns most of the
+ * wave -- so the argmax alone wanders; the fit uses the slopes.
+ */
+static uint16_t iqs9151_ripple_scan_peak(const struct iqs9151_ripple_scan *scan,
+                                         const uint32_t *amp, uint32_t best, uint32_t reach) {
+    const uint16_t at = scan->base_x10 + best * scan->step_x10;
+    if (best < reach || best + reach >= scan->count) {
+        return at;
+    }
+    const int64_t lo = amp[best - reach], mid = amp[best], hi = amp[best + reach];
+    const int64_t denom = 2 * (lo - 2 * mid + hi);
+    if (denom >= 0) {
+        return at; /* not a peak */
+    }
+    /* offset in candidate steps, scaled by 16 for the rounding below */
+    const int64_t off16 = ((lo - hi) * 16 * (int64_t)reach) / denom;
+    const int32_t off_x10 = (int32_t)((off16 * scan->step_x10 + (off16 < 0 ? -8 : 8)) / 16);
+    return (uint16_t)CLAMP((int32_t)at + off_x10, IQS9151_RIPPLE_SCAN_COARSE_MIN_X10,
+                           IQS9151_RIPPLE_MAX_PERIOD_X10);
+}
+
+static void iqs9151_ripple_scan_fine_around(struct iqs9151_ripple_scan *scan, uint16_t centre) {
+    iqs9151_ripple_scan_start(scan, IQS9151_RIPPLE_SCAN_FINE,
+                              centre - IQS9151_RIPPLE_SCAN_FINE_HALF,
+                              IQS9151_RIPPLE_SCAN_FINE_STEP_X10,
+                              2U * IQS9151_RIPPLE_SCAN_FINE_HALF + 1U);
+}
+
+/*
+ * Every so many steps, look at what the bank has learned. Returns a newly
+ * adopted period in tenths, or 0 if nothing changed this time.
+ */
+static uint16_t iqs9151_ripple_scan_verdict(struct iqs9151_ripple_scan *scan, char axis) {
+    if (++scan->updates < IQS9151_RIPPLE_SCAN_EVERY) {
+        return 0;
+    }
+    scan->updates = 0;
+
+    uint32_t amp[IQS9151_RIPPLE_SCAN_MAX];
+    uint32_t best = 0;
+    for (uint32_t i = 0; i < scan->count; i++) {
+        amp[i] = iqs9151_isqrt((int64_t)scan->a[i] * scan->a[i] +
+                               (int64_t)scan->b[i] * scan->b[i]);
+        if (amp[i] > amp[best]) {
+            best = i;
+        }
+    }
+
+    /* The pack: everything more than two steps from the best. In the coarse
+     * sweep a wrong candidate learns only noise, so this is the noise. */
+    uint64_t pack_total = 0;
+    uint32_t pack_n = 0;
+    for (uint32_t i = 0; i < scan->count; i++) {
+        if (i + 2U < best || i > best + 2U) {
+            pack_total += amp[i];
+            pack_n++;
+        }
+    }
+    const uint32_t pack = (uint32_t)(pack_total / MAX(1U, pack_n));
+    const bool coarse = scan->stage == IQS9151_RIPPLE_SCAN_COARSE;
+    const uint16_t estimate =
+        iqs9151_ripple_scan_peak(scan, amp, best, coarse ? 1U : IQS9151_RIPPLE_SCAN_FINE_HALF);
+
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_MOTION_TRACE)
+    LOG_WRN("eqscan %c %s peak %u.%u amp %d pack %d", axis, coarse ? "coarse" : "fine",
+            estimate / 10U, estimate % 10U, iqs9151_ripple_milli((int32_t)amp[best]),
+            iqs9151_ripple_milli((int32_t)pack));
+#else
+    ARG_UNUSED(axis);
+#endif
+
+    /* A wave, not noise: clearly above the floor and, in the coarse sweep,
+     * clearly above the pack. */
+    if (amp[best] < ((uint32_t)IQS9151_RIPPLE_SCAN_MIN_AMP << IQS9151_RIPPLE_COEF_GUARD) ||
+        (coarse && amp[best] < (5U * pack) / 2U)) {
+        scan->agree = 0;
+        scan->last_winner_x10 = 0;
+        /* A fine bank that sees no wave for a while is looking in the wrong
+         * place -- a remembered period from before a resolution change, say.
+         * Sweep again; what was found stays in use until something better
+         * turns up. */
+        if (!coarse && ++scan->lost >= IQS9151_RIPPLE_SCAN_LOST) {
+            const uint16_t found = scan->found_x10;
+            iqs9151_ripple_scan_start(scan, IQS9151_RIPPLE_SCAN_COARSE,
+                                      IQS9151_RIPPLE_SCAN_COARSE_MIN_X10,
+                                      IQS9151_RIPPLE_SCAN_COARSE_STEP_X10,
+                                      IQS9151_RIPPLE_SCAN_MAX);
+            scan->found_x10 = found;
+        }
+        return 0;
+    }
+    scan->lost = 0;
+
+    if (!coarse && scan->found_x10 != 0U &&
+        abs((int32_t)estimate - (int32_t)scan->found_x10) < IQS9151_RIPPLE_SCAN_HOLD_X10) {
+        /* Still where it was: nothing to do, and no flapping over a tenth. */
+        scan->agree = 0;
+        return 0;
+    }
+
+    /* Two verdicts in a row within a step of each other before acting. */
+    if (scan->last_winner_x10 != 0U &&
+        abs((int32_t)estimate - (int32_t)scan->last_winner_x10) <= (int32_t)scan->step_x10) {
+        scan->agree = MIN(scan->agree + 1U, IQS9151_RIPPLE_SCAN_REAGREE);
+    } else {
+        scan->agree = 1;
+    }
+    scan->last_winner_x10 = estimate;
+    const uint8_t needed = (!coarse && scan->found_x10 != 0U) ? IQS9151_RIPPLE_SCAN_REAGREE
+                                                              : IQS9151_RIPPLE_SCAN_AGREE;
+    if (scan->agree < needed) {
+        return 0;
+    }
+
+    if (coarse) {
+        /* Narrow in: a tenth apart, half a count either side. Nothing is
+         * adopted yet; half a count is still a visible error. */
+        iqs9151_ripple_scan_fine_around(scan, estimate);
+        return 0;
+    }
+
+    /* Fine: adopt, and re-centre the bank on it so a later drift can still be
+     * followed in either direction. */
+    const uint16_t found = scan->found_x10;
+    iqs9151_ripple_scan_fine_around(scan, estimate);
+    scan->found_x10 = estimate;
+    return (estimate != found) ? estimate : 0;
+}
+
+/*
+ * The period this axis should use: what the search found if it is on and has
+ * found one, else the setting. Learning and the search run whenever either
+ * is non-zero or the search is on.
+ */
 static int16_t iqs9151_ripple_apply(struct iqs9151_ripple_eq *eq, char axis, uint16_t abs_pos,
-                                    int16_t value, uint16_t period_x10) {
-    if (period_x10 == 0U) {
+                                    int16_t value, uint16_t setting_x10, bool scanning) {
+    const uint16_t resolution = (uint16_t)atomic_get(
+        (axis == 'y') ? &iqs9151_requested_resolution_y : &iqs9151_requested_resolution_x);
+    if (scanning != eq->scanning) {
+        eq->scanning = scanning;
+        iqs9151_ripple_scan_reset(&eq->scan, axis);
+        eq->scan.resolution = resolution;
+    } else if (scanning && eq->scan.resolution != resolution) {
+        /* The period is in the device's absolute units, so a new resolution
+         * is a new period: forget the old one and sweep. Zero is not a
+         * resolution but the moment before the first request is served. */
+        const bool changed = eq->scan.resolution != 0U;
+        eq->scan.resolution = resolution;
+        if (changed) {
+            iqs9151_ripple_remembered[(axis == 'y') ? 1 : 0] = 0;
+            iqs9151_ripple_scan_reset(&eq->scan, axis);
+        }
+    }
+
+    const uint16_t period_x10 =
+        (scanning && eq->scan.found_x10 != 0U) ? eq->scan.found_x10 : setting_x10;
+
+    if (period_x10 == 0U && !scanning) {
         if (eq->period_x10 != 0U) {
             iqs9151_ripple_reset(eq, 0);
         }
@@ -3095,10 +3462,11 @@ static int16_t iqs9151_ripple_apply(struct iqs9151_ripple_eq *eq, char axis, uin
         iqs9151_ripple_reset(eq, period_x10);
     }
 
-    const uint32_t bin = iqs9151_ripple_bin(abs_pos, period_x10);
     /* The reference window is in whole counts; a tenth either way is nothing
-     * to an average. */
-    const int32_t period = MAX(1, (period_x10 + 5) / 10);
+     * to an average, and while the search has not found a period yet any
+     * plausible one will do. */
+    const uint16_t learn_x10 = (period_x10 != 0U) ? period_x10 : 760U;
+    const int32_t period = MAX(1, (learn_x10 + 5) / 10);
 
     /* The reference: this axis's movement averaged over the last period of
      * travel, which is what the finger really did with the ripple summed out.
@@ -3117,40 +3485,62 @@ static int16_t iqs9151_ripple_apply(struct iqs9151_ripple_eq *eq, char axis, uin
             ((int64_t)mag * eq->ref.frames * 32768) / ((int64_t)eq->ref.dist * spans);
         const int32_t sample = (int32_t)MIN(ratio, 4 * 32768);
 
-        const int32_t e = (sample - iqs9151_ripple_g(eq, bin)) >> IQS9151_RIPPLE_MU_SHIFT;
-        for (uint32_t k = 0; k < IQS9151_RIPPLE_HARMONICS; k++) {
-            int32_t c, s;
-            iqs9151_ripple_basis(bin, k + 1U, &c, &s);
-            /* Each harmonic is allowed less than the one below it: the wave is
-             * mostly fundamental, and the limits together keep g above zero. */
-            const int32_t limit = IQS9151_RIPPLE_COEF_LIMIT / (int32_t)(k + 1U);
-            eq->a[k] = CLAMP(eq->a[k] + ((e * c) >> 15), -limit, limit);
-            eq->b[k] = CLAMP(eq->b[k] + ((e * s) >> 15), -limit, limit);
+        if (scanning) {
+            iqs9151_ripple_scan_learn(&eq->scan, abs_pos, sample);
+            const uint16_t found = iqs9151_ripple_scan_verdict(&eq->scan, axis);
+            if (found != 0U) {
+                /* WRN so it shows in the devtool log without raising the level. */
+                LOG_WRN("ripple %c: period %u.%u found", axis, found / 10U, found % 10U);
+                iqs9151_ripple_remember(axis, found);
+                /* Adopted from the next frame; this one is still learned at
+                 * the old period below, which the reset then discards. */
+            }
         }
 
-        if (++eq->tick >= IQS9151_RIPPLE_NORM_EVERY) {
-            eq->tick = 0;
-            iqs9151_ripple_rebuild(eq);
-        }
+        if (period_x10 != 0U) {
+            const uint32_t bin = iqs9151_ripple_bin(abs_pos, period_x10);
+            const int32_t e = sample - iqs9151_ripple_g(eq, bin);
+            for (uint32_t k = 0; k < IQS9151_RIPPLE_HARMONICS; k++) {
+                int32_t c, s;
+                iqs9151_ripple_basis(bin, k + 1U, &c, &s);
+                /* Each harmonic is allowed less than the one below it: the
+                 * wave is mostly fundamental, and the limits together keep g
+                 * above zero. */
+                const int32_t limit = (IQS9151_RIPPLE_COEF_LIMIT / (int32_t)(k + 1U))
+                                      << IQS9151_RIPPLE_COEF_GUARD;
+                eq->a[k] = CLAMP(eq->a[k] + iqs9151_ripple_step(e, c, IQS9151_RIPPLE_MU_SHIFT),
+                                 -limit, limit);
+                eq->b[k] = CLAMP(eq->b[k] + iqs9151_ripple_step(e, s, IQS9151_RIPPLE_MU_SHIFT),
+                                 -limit, limit);
+            }
+
+            if (++eq->tick >= IQS9151_RIPPLE_NORM_EVERY) {
+                eq->tick = 0;
+                iqs9151_ripple_rebuild(eq);
+            }
 
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_MOTION_TRACE)
-        /* The learned wave, in thousandths, so a devtool log shows whether it
-         * has settled and how much of it is in each harmonic. */
-        if (++eq->updates >= IQS9151_RIPPLE_TRACE_EVERY) {
-            eq->updates = 0;
-            LOG_WRN("eq %c p%u.%u a%d,%d,%d,%d b%d,%d,%d,%d", axis, period_x10 / 10U,
-                    period_x10 % 10U, (int)(eq->a[0] * 1000 / 32768),
-                    (int)(eq->a[1] * 1000 / 32768), (int)(eq->a[2] * 1000 / 32768),
-                    (int)(eq->a[3] * 1000 / 32768), (int)(eq->b[0] * 1000 / 32768),
-                    (int)(eq->b[1] * 1000 / 32768), (int)(eq->b[2] * 1000 / 32768),
-                    (int)(eq->b[3] * 1000 / 32768));
-        }
-#else
-        ARG_UNUSED(axis);
+            /* The learned wave, in thousandths, so a devtool log shows whether
+             * it has settled and how much of it is in each harmonic. */
+            if (++eq->updates >= IQS9151_RIPPLE_TRACE_EVERY) {
+                eq->updates = 0;
+                LOG_WRN("eq %c p%u.%u a%d,%d,%d,%d b%d,%d,%d,%d", axis, period_x10 / 10U,
+                        period_x10 % 10U, iqs9151_ripple_milli(eq->a[0]),
+                        iqs9151_ripple_milli(eq->a[1]), iqs9151_ripple_milli(eq->a[2]),
+                        iqs9151_ripple_milli(eq->a[3]), iqs9151_ripple_milli(eq->b[0]),
+                        iqs9151_ripple_milli(eq->b[1]), iqs9151_ripple_milli(eq->b[2]),
+                        iqs9151_ripple_milli(eq->b[3]));
+            }
 #endif
+        }
+    }
+
+    if (period_x10 == 0U) {
+        return value; /* searching, nothing found yet: pass through */
     }
 
     /* Divide the ripple out of this report, carrying the fraction. */
+    const uint32_t bin = iqs9151_ripple_bin(abs_pos, period_x10);
     eq->rem_fp += (int32_t)value * (int32_t)eq->corr[bin];
     int32_t out = eq->rem_fp / 256; /* toward zero; the carry keeps its sign */
     eq->rem_fp -= out * 256;
@@ -3181,10 +3571,11 @@ static void iqs9151_apply_cursor_gain(struct iqs9151_data *data,
     /* First, because it is the only stage that needs the absolute position,
      * and because the ripple lives in the raw counts: everything after this
      * sees a report with the wave already divided out. */
+    const bool scanning = atomic_get(&iqs9151_ripple_auto) != 0;
     frame->rel_x = iqs9151_ripple_apply(&data->ripple_x, 'x', frame->finger1_x, frame->rel_x,
-                                        (uint16_t)atomic_get(&iqs9151_ripple_period_x));
+                                        (uint16_t)atomic_get(&iqs9151_ripple_period_x), scanning);
     frame->rel_y = iqs9151_ripple_apply(&data->ripple_y, 'y', frame->finger1_y, frame->rel_y,
-                                        (uint16_t)atomic_get(&iqs9151_ripple_period_y));
+                                        (uint16_t)atomic_get(&iqs9151_ripple_period_y), scanning);
 
     const int32_t window = (int32_t)atomic_get(&iqs9151_cursor_distance_window);
     frame->rel_x = iqs9151_distance_smooth_axis(&data->dist_smoother_x, frame->rel_x, window);

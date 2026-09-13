@@ -95,6 +95,10 @@
 #define IQS9151_SETTING_RIPPLE_PERIOD_X_X10_KEY "ripple_period_x_x10"
 #define IQS9151_SETTING_RIPPLE_PERIOD_Y_X10_KEY "ripple_period_y_x10"
 
+/* Let the driver find the periods itself; the values above are then only the
+ * starting point. See iqs9151_set_ripple_auto in control.h. */
+#define IQS9151_SETTING_RIPPLE_AUTO_KEY "ripple_auto"
+
 /*
  * The device's own low-speed filter block, one key per register. See
  * struct iqs9151_filter_tune in control.h for what each does. Exposed because

@@ -140,6 +140,13 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
     ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
     ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_INT32(0, 1600));
 
+ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
+    iqs9151_ripple_auto, IQS9151_SETTINGS_SUBSYSTEM_ID, IQS9151_SETTING_RIPPLE_AUTO_KEY,
+    ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL,
+    ZMK_CUSTOM_SETTING_VALUE_BOOL(IS_ENABLED(CONFIG_INPUT_IQS9151_RIPPLE_AUTO)),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
 /*
  * The device's own low-speed filtering. Six registers, six settings; the
  * ranges are the registers' widths. Pushed to the device as one block when any
@@ -248,6 +255,8 @@ static void apply_cursor_gain(void) {
     if (ret < 0) {
         LOG_WRN("Refused ripple period %d / %d (%d)", ripple_x, ripple_y, ret);
     }
+    (void)iqs9151_set_ripple_auto(read_bool(IQS9151_SETTING_RIPPLE_AUTO_KEY,
+                                            IS_ENABLED(CONFIG_INPUT_IQS9151_RIPPLE_AUTO)));
 }
 
 static void apply_filter(void) {
@@ -325,7 +334,8 @@ static int iqs9151_settings_event_listener(const zmk_event_t *eh) {
                strcmp(changed->setting->key,
                       IQS9151_SETTING_CURSOR_DISTANCE_SMOOTHING_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_RIPPLE_PERIOD_X_X10_KEY) == 0 ||
-               strcmp(changed->setting->key, IQS9151_SETTING_RIPPLE_PERIOD_Y_X10_KEY) == 0) {
+               strcmp(changed->setting->key, IQS9151_SETTING_RIPPLE_PERIOD_Y_X10_KEY) == 0 ||
+               strcmp(changed->setting->key, IQS9151_SETTING_RIPPLE_AUTO_KEY) == 0) {
         apply_cursor_gain();
     } else if (strncmp(changed->setting->key, "filter_", 7) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_STATIONARY_THRESHOLD_KEY) == 0 ||

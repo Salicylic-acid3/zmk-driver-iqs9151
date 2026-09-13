@@ -34,6 +34,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /**
@@ -103,6 +104,18 @@ int iqs9151_set_cursor_distance_smoothing(uint16_t counts);
  * @retval -EINVAL if either period exceeds 1600 (160.0 counts).
  */
 int iqs9151_set_ripple_period(uint16_t x_tenths, uint16_t y_tenths);
+
+/**
+ * Let the driver find each axis's ripple period by itself.
+ *
+ * A bank of candidate periods learns alongside the equaliser and the one
+ * whose wave grows largest is adopted, overriding the configured period for
+ * that axis once found (an axis with no wave never locks and keeps its
+ * setting). Turning it off or on again restarts the search.
+ *
+ * @retval 0 always.
+ */
+int iqs9151_set_ripple_auto(bool enabled);
 
 /**
  * The device's own low-speed filtering, as one block.
