@@ -203,10 +203,12 @@ config INPUT_IQS9151_RIPPLE_AUTO
       Runs a bank of candidate periods (70.0 to 84.0 counts, then a tenth
       apart around the best) alongside the equaliser on both axes, learning
       from the same strokes, and adopts the one whose wave grows largest.
-      The first two pads measured wanted different values, so the number
-      is per unit and this saves finding it by hand. The configured period
-      is used until something is found; an axis with no wave (the short one
-      here) never locks and stays as configured. Also a runtime setting.
+      The first two pads measured disagreed -- one wanted 75.5, the other
+      has no wave at all -- so the number is per unit and this saves finding
+      it by hand. While the search is on nothing is corrected until a period
+      is found, because a correction at a period the pad does not have is a
+      ripple of its own; the configured periods are used only with the
+      search off. Also a runtime setting.
 
 config INPUT_IQS9151_RIPPLE_PERIOD_Y_X10
     int "IQS9151 positional ripple period on the sensor Y axis, in tenths of a count (0 = off)"

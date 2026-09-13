@@ -399,7 +399,12 @@ struct iqs9151_dist_smoother {
 #define IQS9151_RIPPLE_MAX_PERIOD_X10 1600 /* 160.0 counts */
 #define IQS9151_RIPPLE_BINS 128
 #define IQS9151_RIPPLE_HARMONICS 4
-#define IQS9151_RIPPLE_MU_SHIFT 6      /* LMS step 1/64 */
+#define IQS9151_RIPPLE_MU_SHIFT 7      /* LMS step 1/128 */
+/* Below this learned fundamental the equaliser applies nothing. Coefficients
+ * learned from noise alone sit around 0.05-0.1 each, and eight of them at a
+ * period the pad does not have add up to a wave of their own: on a pad with
+ * no ripple, the correction was the ripple. */
+#define IQS9151_RIPPLE_MIN_FUNDAMENTAL 4915 /* 0.15 in Q15 */
 #define IQS9151_RIPPLE_SCAN_MU_SHIFT 9 /* the period search remembers longer: 1/512 */
 #define IQS9151_RIPPLE_NORM_EVERY 16   /* rebuild the correction table this often */
 #define IQS9151_RIPPLE_COEF_LIMIT 29491 /* 0.9 in Q15 for the fundamental */
@@ -3213,6 +3218,23 @@ static void iqs9151_ripple_basis(uint32_t bin, uint32_t k, int32_t *c, int32_t *
     *c = iqs9151_sin_q15[(idx + IQS9151_RIPPLE_BINS / 4U) & (IQS9151_RIPPLE_BINS - 1U)];
 }
 
+static uint32_t iqs9151_isqrt(uint64_t v) {
+    uint64_t r = 0, bit = 1ULL << 62;
+    while (bit > v) {
+        bit >>= 2;
+    }
+    while (bit != 0) {
+        if (v >= r + bit) {
+            v -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+        bit >>= 2;
+    }
+    return (uint32_t)r;
+}
+
 /* g(bin) = 1 + sum(ak cos k.phase + bk sin k.phase), Q15, floored above zero. */
 static int32_t iqs9151_ripple_g(const struct iqs9151_ripple_eq *eq, uint32_t bin) {
     int64_t sum = 0;
@@ -3230,6 +3252,17 @@ static int32_t iqs9151_ripple_g(const struct iqs9151_ripple_eq *eq, uint32_t bin
  * ripple out must not also change how far a stroke goes.
  */
 static void iqs9151_ripple_rebuild(struct iqs9151_ripple_eq *eq) {
+    /* No convincing wave learned: correct nothing rather than something
+     * imagined. The learning goes on underneath. */
+    const uint32_t fundamental =
+        iqs9151_isqrt((int64_t)eq->a[0] * eq->a[0] + (int64_t)eq->b[0] * eq->b[0]);
+    if (fundamental < ((uint32_t)IQS9151_RIPPLE_MIN_FUNDAMENTAL << IQS9151_RIPPLE_COEF_GUARD)) {
+        for (uint32_t p = 0; p < IQS9151_RIPPLE_BINS; p++) {
+            eq->corr[p] = 256U;
+        }
+        return;
+    }
+
     /* Two passes rather than a table on the stack: this runs on the system
      * work queue, whose stack is already the tightest thing on this board. */
     uint32_t total = 0;
@@ -3246,23 +3279,6 @@ static void iqs9151_ripple_rebuild(struct iqs9151_ripple_eq *eq) {
 /* A guarded coefficient in thousandths, for the logs. */
 static int iqs9151_ripple_milli(int32_t coef) {
     return (int)(((int64_t)coef * 1000) / IQS9151_RIPPLE_COEF_ONE);
-}
-
-static uint32_t iqs9151_isqrt(uint64_t v) {
-    uint64_t r = 0, bit = 1ULL << 62;
-    while (bit > v) {
-        bit >>= 2;
-    }
-    while (bit != 0) {
-        if (v >= r + bit) {
-            v -= r + bit;
-            r = (r >> 1) + bit;
-        } else {
-            r >>= 1;
-        }
-        bit >>= 2;
-    }
-    return (uint32_t)r;
 }
 
 /* mu * e * basis, into a guarded coefficient, rounded rather than floored. */
@@ -3425,9 +3441,11 @@ static uint16_t iqs9151_ripple_scan_verdict(struct iqs9151_ripple_scan *scan, ch
 }
 
 /*
- * The period this axis should use: what the search found if it is on and has
- * found one, else the setting. Learning and the search run whenever either
- * is non-zero or the search is on.
+ * The period this axis should use: what the search found, when the search is
+ * on -- nothing at all until it has found one, because a correction at a
+ * period the pad does not have is a ripple of its own -- else the setting.
+ * Learning and the search run whenever either is non-zero or the search is
+ * on.
  */
 static int16_t iqs9151_ripple_apply(struct iqs9151_ripple_eq *eq, char axis, uint16_t abs_pos,
                                     int16_t value, uint16_t setting_x10, bool scanning) {
@@ -3449,8 +3467,7 @@ static int16_t iqs9151_ripple_apply(struct iqs9151_ripple_eq *eq, char axis, uin
         }
     }
 
-    const uint16_t period_x10 =
-        (scanning && eq->scan.found_x10 != 0U) ? eq->scan.found_x10 : setting_x10;
+    const uint16_t period_x10 = scanning ? eq->scan.found_x10 : setting_x10;
 
     if (period_x10 == 0U && !scanning) {
         if (eq->period_x10 != 0U) {
