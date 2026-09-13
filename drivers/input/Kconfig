@@ -149,6 +149,31 @@ config INPUT_IQS9151_CURSOR_SMOOTHING
       Start at 2. Higher is smoother and laggier; past 3 or 4 it starts to feel
       detached on a pad reporting at a few hundred hertz.
 
+config INPUT_IQS9151_CURSOR_DISTANCE_SMOOTHING
+    int "IQS9151 average the pointer over this many counts of finger travel"
+    range 0 512
+    default 0
+    help
+      0 is off. A non-zero value averages the reported movement over a window
+      of that many of the device's own counts of finger travel -- not reports.
+
+      This is for a different defect than the smoothing above, one no report
+      count can reach: the device's reported position, plotted against where
+      the finger really is, is a gentle wave rather than a straight line, and on
+      a coarse axis it can repeat every couple of millimetres and swing the
+      reported speed better than two to one. Because the wave is fixed in
+      distance, moving faster only crosses it faster -- so a smoother counted in
+      reports slides off it, its right length changing with speed, while one
+      counted in distance sits on it at every speed.
+
+      Averaged over a window one ripple long the wave cancels and the real
+      travel survives. Set it near a ripple period: at this pad's ~23 counts per
+      millimetre a two-millimetre ripple is about 45. The lag is half the window
+      and is paid in following distance, not time -- so it shrinks in
+      milliseconds the faster you move, and a large window only feels heavy at a
+      crawl. Measure the period first (the counting tool reports it); guessing
+      high just adds lag without cancelling anything.
+
 config INPUT_IQS9151_RECOVERY_STACK_SIZE
     int "IQS9151 reset-recovery thread stack size"
     default 1536

@@ -337,6 +337,26 @@ struct iqs9151_motion_history {
     uint8_t count;
 };
 
+/*
+ * A ring of recent per-report deltas for the distance-window smoother.
+ *
+ * The window is measured in finger-travel counts, not reports, so its length in
+ * samples is however many recent reports it takes to cover that distance --
+ * few when the finger is quick, many when it crawls. The cap bounds the crawl:
+ * at roughly half a count per report the window stops growing and the
+ * smoothing eases off, which is where the ripple is slowest and least felt
+ * anyway. `sum` and `dist` are kept incrementally so each report is O(1).
+ */
+#define IQS9151_DIST_SMOOTH_CAP 96
+struct iqs9151_dist_smoother {
+    int16_t buf[IQS9151_DIST_SMOOTH_CAP];
+    uint8_t head;   /* next slot to write */
+    uint8_t count;  /* samples currently in the window */
+    int32_t sum;    /* signed sum of the samples in the window */
+    int32_t dist;   /* sum of the samples' magnitudes: the window's length in counts */
+    int32_t rem_fp; /* output carry, in 1/256 of a count */
+};
+
 struct iqs9151_data {
     const struct device *dev;
     struct gpio_callback gpio_cb;
@@ -407,6 +427,14 @@ struct iqs9151_data {
      */
     int32_t cursor_gain_remainder_x;
     int32_t cursor_gain_remainder_y;
+    /*
+     * Distance-window smoothing state, one per axis. See
+     * iqs9151_distance_smooth_axis: a moving average of the reported movement
+     * taken over a fixed window of finger travel, which flattens a ripple that
+     * repeats every so many millimetres whatever the speed it is crossed at.
+     */
+    struct iqs9151_dist_smoother dist_smoother_x;
+    struct iqs9151_dist_smoother dist_smoother_y;
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_MOTION_TRACE)
     int64_t trace_last_read_ms;
     uint16_t trace_quiet;
@@ -2722,18 +2750,120 @@ static int16_t iqs9151_scale_axis(int16_t value, int32_t gain_x10, int32_t sprea
     return (int16_t)CLAMP(out, INT16_MIN, INT16_MAX);
 }
 
+/*
+ * Distance-window smoothing: a moving average of the reported movement taken
+ * over a fixed span of finger travel rather than a fixed number of reports.
+ *
+ * This is for a defect the gain and its report smoothing cannot touch: the
+ * device's position, plotted against where the finger really is, is not a
+ * straight line but a gentle wave, and on this pad's coarse long axis the wave
+ * repeats about every two millimetres and swings the reported speed by better
+ * than two to one. Because it is fixed in *distance*, dragging faster only
+ * crosses it faster -- the ripple stays two millimetres apart however quickly
+ * you move -- which is exactly why a smoother counted in reports slides off it:
+ * the right number of reports to average over changes with speed.
+ *
+ * Averaged over a window one ripple long, the wave sums to nothing and the
+ * genuine travel survives. The window is counted in the device's own counts
+ * (~23 to the millimetre here), so a value near a ripple period -- 45 or so --
+ * is the setting; 0 turns it off and this becomes a passthrough. The group
+ * delay is half the window, and being a distance it is paid in millimetres of
+ * following distance, not milliseconds -- fixed in the hand, and shorter in
+ * time the faster you go.
+ *
+ * It runs before the gain, on the raw reported counts, because that is where
+ * the wave lives; the gain then amplifies something already smooth. Only the
+ * cursor reads these deltas, so the gestures -- which work from the absolute
+ * finger coordinates -- are untouched.
+ */
+static atomic_t iqs9151_cursor_distance_window =
+    ATOMIC_INIT(CONFIG_INPUT_IQS9151_CURSOR_DISTANCE_SMOOTHING);
+
+int iqs9151_set_cursor_distance_smoothing(uint16_t counts) {
+    atomic_set(&iqs9151_cursor_distance_window, (atomic_val_t)counts);
+    return 0;
+}
+
+static void iqs9151_dist_smoother_reset(struct iqs9151_dist_smoother *s) {
+    s->head = 0;
+    s->count = 0;
+    s->sum = 0;
+    s->dist = 0;
+    s->rem_fp = 0;
+}
+
+static int16_t iqs9151_distance_smooth_axis(struct iqs9151_dist_smoother *s, int16_t value,
+                                            int32_t window) {
+    if (window <= 0) {
+        /* Off: nothing accumulated, so a later enable starts clean. */
+        if (s->count != 0 || s->rem_fp != 0) {
+            iqs9151_dist_smoother_reset(s);
+        }
+        return value;
+    }
+
+    const int32_t mag = (value < 0) ? -(int32_t)value : (int32_t)value;
+
+    /* Push the newest report, evicting the oldest first if the ring is full. */
+    if (s->count == IQS9151_DIST_SMOOTH_CAP) {
+        const uint8_t tail = (uint8_t)((s->head + IQS9151_DIST_SMOOTH_CAP - s->count) %
+                                       IQS9151_DIST_SMOOTH_CAP);
+        const int16_t old = s->buf[tail];
+        s->sum -= old;
+        s->dist -= (old < 0) ? -(int32_t)old : (int32_t)old;
+        s->count--;
+    }
+    s->buf[s->head] = value;
+    s->head = (uint8_t)((s->head + 1U) % IQS9151_DIST_SMOOTH_CAP);
+    s->count++;
+    s->sum += value;
+    s->dist += mag;
+
+    /* Drop the oldest reports until the window is no longer than one ripple,
+     * always keeping at least the newest so a lone large report still moves. */
+    while (s->count > 1 && s->dist > window) {
+        const uint8_t tail = (uint8_t)((s->head + IQS9151_DIST_SMOOTH_CAP - s->count) %
+                                       IQS9151_DIST_SMOOTH_CAP);
+        const int16_t old = s->buf[tail];
+        const int32_t old_mag = (old < 0) ? -(int32_t)old : (int32_t)old;
+        /* Stop before the window would collapse below one ripple. */
+        if (s->dist - old_mag < window) {
+            break;
+        }
+        s->sum -= old;
+        s->dist -= old_mag;
+        s->count--;
+    }
+
+    /* Emit this report's share of the window average, carrying the fraction so
+     * a long crawl still adds up to the distance the finger actually covered. */
+    s->rem_fp += ((int32_t)s->sum * 256) / (int32_t)s->count;
+    int32_t out = s->rem_fp / 256; /* truncates toward zero; the carry keeps its sign */
+    s->rem_fp -= out * 256;
+
+    return (int16_t)CLAMP(out, INT16_MIN, INT16_MAX);
+}
+
 static void iqs9151_apply_cursor_gain(struct iqs9151_data *data,
                                       struct iqs9151_frame *frame) {
-    if (frame->finger_count == 0U) {
+    if (frame->finger_count != 1U) {
         /*
-         * Finger gone: drop what is owed rather than glide on for a few
-         * reports. A pointer that keeps moving after you lift is worse than
-         * one that stops a pixel short.
+         * Finger gone, or a second one down: drop what is owed rather than
+         * glide on for a few reports. A pointer that keeps moving after you
+         * lift is worse than one that stops a pixel short. The distance
+         * smoother is reset for the same reason -- its window must not span a
+         * lift, or a two-finger gesture.
          */
         data->cursor_gain_remainder_x = 0;
         data->cursor_gain_remainder_y = 0;
+        iqs9151_dist_smoother_reset(&data->dist_smoother_x);
+        iqs9151_dist_smoother_reset(&data->dist_smoother_y);
         return;
     }
+
+    const int32_t window = (int32_t)atomic_get(&iqs9151_cursor_distance_window);
+    frame->rel_x = iqs9151_distance_smooth_axis(&data->dist_smoother_x, frame->rel_x, window);
+    frame->rel_y = iqs9151_distance_smooth_axis(&data->dist_smoother_y, frame->rel_y, window);
 
     const int32_t spread = MAX(1, (int32_t)atomic_get(&iqs9151_cursor_smoothing));
 

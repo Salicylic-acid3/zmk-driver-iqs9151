@@ -81,6 +81,11 @@
  * amplifying a quantised axis is what makes it step. */
 #define IQS9151_SETTING_CURSOR_SMOOTHING_KEY "cursor_smoothing"
 
+/* Counts of finger travel to average the pointer over; 0 is off. A window in
+ * distance rather than reports, so it flattens a ripple fixed in millimetres at
+ * any speed. See iqs9151_set_cursor_distance_smoothing in control.h. */
+#define IQS9151_SETTING_CURSOR_DISTANCE_SMOOTHING_KEY "cursor_distance_smoothing"
+
 /*
  * The device's own low-speed filter block, one key per register. See
  * struct iqs9151_filter_tune in control.h for what each does. Exposed because

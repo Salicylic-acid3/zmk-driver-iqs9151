@@ -75,6 +75,19 @@ int iqs9151_set_cursor_gain(uint16_t x_gain_x10, uint16_t y_gain_x10);
 int iqs9151_set_cursor_smoothing(uint16_t reports);
 
 /**
+ * Average the pointer over this many counts of finger travel; 0 turns it off.
+ *
+ * Unlike the report smoothing above, this window is measured in distance, so it
+ * flattens a ripple that repeats every so many millimetres at whatever speed
+ * the finger crosses it -- the wave in the device's position-versus-truth curve
+ * that a report-counted smoother cannot sit on. Set it near one ripple period,
+ * in the device's own counts (~23 per millimetre on this pad).
+ *
+ * @retval 0 always.
+ */
+int iqs9151_set_cursor_distance_smoothing(uint16_t counts);
+
+/**
  * The device's own low-speed filtering, as one block.
  *
  * Every field maps to a register in the 0x11EA..0x11F4 run of the trackpad
