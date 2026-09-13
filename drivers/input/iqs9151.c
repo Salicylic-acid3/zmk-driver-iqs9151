@@ -2824,6 +2824,14 @@ static void iqs9151_report_frame_events(struct iqs9151_data *data,
      * over by the time it is recognised, so there is nothing left to hold.
      * K_FOREVER because dropping half of a press/release pair latches the key.
      */
+    /* Cursor movement owed from before this frame goes out first, whatever
+     * the frame is: otherwise a second finger landing leaves it waiting
+     * through the whole scroll, to arrive as a stray jump at the end. */
+    if (frame->finger_count != 1U || !cursor_moving || suppress_cursor_tail ||
+        data->three_active) {
+        iqs9151_report_cursor(data, 0, 0, now_ms, true);
+    }
+
     if (two_result->swipe_code != 0U) {
         iqs9151_report_key_event(dev, two_result->swipe_code, true, true, K_FOREVER);
         iqs9151_report_key_event(dev, two_result->swipe_code, false, true, K_FOREVER);
@@ -2854,10 +2862,6 @@ static void iqs9151_report_frame_events(struct iqs9151_data *data,
     } else if (frame->finger_count == 1U && cursor_moving && !suppress_cursor_tail &&
                !data->three_active) {
         iqs9151_report_cursor(data, frame->rel_x, frame->rel_y, now_ms, false);
-    } else {
-        /* Not a cursor frame: whatever is owed goes out now rather than
-         * arriving after the finger has changed its mind. */
-        iqs9151_report_cursor(data, 0, 0, now_ms, true);
     }
 }
 

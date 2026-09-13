@@ -139,9 +139,13 @@ config INPUT_IQS9151_CURSOR_REPORT_INTERVAL_MS
       relays each event as its own notification: four hundred a second into
       a link that carries perhaps a hundred. The rest queue, and a queue is
       lag -- the pointer trails the finger, and the half's key presses,
-      waiting behind them, arrive late enough to mistype. 15 matches the
-      link's cadence and costs at most 15 ms of latency. Leave it 0 on the
-      half that talks to the host directly. Also a runtime setting.
+      waiting behind them, arrive late enough to mistype. Set it to the
+      split link's connection interval (ZMK_SPLIT_BLE_PREF_INT 6 = 7.5 ms,
+      so 8): one report per connection event is what the link carries
+      without queueing, and a longer interval only makes each pointer step
+      coarser -- at 15 a slow drag moves in steps three times the size it
+      does on the USB half. Leave it 0 on the half that talks to the host
+      directly. Also a runtime setting.
 
 config INPUT_IQS9151_CURSOR_SMOOTHING
     int "IQS9151 spread each report's pointer movement over this many reports"
