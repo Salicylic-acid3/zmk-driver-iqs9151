@@ -64,6 +64,27 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
     ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
     ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
+ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
+    iqs9151_cursor_report_interval, IQS9151_SETTINGS_SUBSYSTEM_ID,
+    IQS9151_SETTING_CURSOR_REPORT_INTERVAL_KEY, ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+    ZMK_CUSTOM_SETTING_VALUE_INT32(CONFIG_INPUT_IQS9151_CURSOR_REPORT_INTERVAL_MS),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
+
+ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
+    iqs9151_swipe3_threshold_x, IQS9151_SETTINGS_SUBSYSTEM_ID,
+    IQS9151_SETTING_SWIPE3_THRESHOLD_X_KEY, ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+    ZMK_CUSTOM_SETTING_VALUE_INT32(CONFIG_INPUT_IQS9151_3F_SWIPE_THRESHOLD),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_INT32(1, 1000));
+
+ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
+    iqs9151_swipe3_threshold_y, IQS9151_SETTINGS_SUBSYSTEM_ID,
+    IQS9151_SETTING_SWIPE3_THRESHOLD_Y_KEY, ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+    ZMK_CUSTOM_SETTING_VALUE_INT32(CONFIG_INPUT_IQS9151_3F_SWIPE_THRESHOLD_Y),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_INT32(1, 1000));
+
 /*
  * The pad's coordinate scale, as two numbers the owner can move.
  *
@@ -257,6 +278,19 @@ static void apply_cursor_gain(void) {
     }
     (void)iqs9151_set_ripple_auto(read_bool(IQS9151_SETTING_RIPPLE_AUTO_KEY,
                                             IS_ENABLED(CONFIG_INPUT_IQS9151_RIPPLE_AUTO)));
+
+    const int32_t interval = read_int32(IQS9151_SETTING_CURSOR_REPORT_INTERVAL_KEY,
+                                        CONFIG_INPUT_IQS9151_CURSOR_REPORT_INTERVAL_MS);
+    (void)iqs9151_set_cursor_report_interval((uint16_t)MAX(0, interval));
+
+    const int32_t swipe_x = read_int32(IQS9151_SETTING_SWIPE3_THRESHOLD_X_KEY,
+                                       CONFIG_INPUT_IQS9151_3F_SWIPE_THRESHOLD);
+    const int32_t swipe_y = read_int32(IQS9151_SETTING_SWIPE3_THRESHOLD_Y_KEY,
+                                       CONFIG_INPUT_IQS9151_3F_SWIPE_THRESHOLD_Y);
+    ret = iqs9151_set_swipe3_threshold((uint16_t)swipe_x, (uint16_t)swipe_y);
+    if (ret < 0) {
+        LOG_WRN("Refused swipe threshold %d / %d (%d)", swipe_x, swipe_y, ret);
+    }
 }
 
 static void apply_filter(void) {
@@ -335,7 +369,10 @@ static int iqs9151_settings_event_listener(const zmk_event_t *eh) {
                       IQS9151_SETTING_CURSOR_DISTANCE_SMOOTHING_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_RIPPLE_PERIOD_X_X10_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_RIPPLE_PERIOD_Y_X10_KEY) == 0 ||
-               strcmp(changed->setting->key, IQS9151_SETTING_RIPPLE_AUTO_KEY) == 0) {
+               strcmp(changed->setting->key, IQS9151_SETTING_RIPPLE_AUTO_KEY) == 0 ||
+               strcmp(changed->setting->key, IQS9151_SETTING_CURSOR_REPORT_INTERVAL_KEY) == 0 ||
+               strcmp(changed->setting->key, IQS9151_SETTING_SWIPE3_THRESHOLD_X_KEY) == 0 ||
+               strcmp(changed->setting->key, IQS9151_SETTING_SWIPE3_THRESHOLD_Y_KEY) == 0) {
         apply_cursor_gain();
     } else if (strncmp(changed->setting->key, "filter_", 7) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_STATIONARY_THRESHOLD_KEY) == 0 ||

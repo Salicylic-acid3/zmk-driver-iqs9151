@@ -99,6 +99,15 @@
  * starting point. See iqs9151_set_ripple_auto in control.h. */
 #define IQS9151_SETTING_RIPPLE_AUTO_KEY "ripple_auto"
 
+/* Report pointer movement at most this often, in ms; 0 is every frame. For a
+ * half whose pointer crosses a BLE link. See iqs9151_set_cursor_report_interval
+ * in control.h. */
+#define IQS9151_SETTING_CURSOR_REPORT_INTERVAL_KEY "cursor_report_interval_ms"
+
+/* Three-finger swipe thresholds per sensor axis, in counts. */
+#define IQS9151_SETTING_SWIPE3_THRESHOLD_X_KEY "swipe3_threshold_x"
+#define IQS9151_SETTING_SWIPE3_THRESHOLD_Y_KEY "swipe3_threshold_y"
+
 /*
  * The device's own low-speed filter block, one key per register. See
  * struct iqs9151_filter_tune in control.h for what each does. Exposed because

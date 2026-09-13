@@ -100,6 +100,17 @@ LOG_MODULE_REGISTER(iqs9151, CONFIG_INPUT_IQS9151_LOG_LEVEL);
  */
 #define THREE_FINGER_SWIPE_THRESHOLD_X CONFIG_INPUT_IQS9151_3F_SWIPE_THRESHOLD
 #define THREE_FINGER_SWIPE_THRESHOLD_Y CONFIG_INPUT_IQS9151_3F_SWIPE_THRESHOLD_Y
+/*
+ * How long a three-finger gesture survives the device reporting two.
+ *
+ * Three fingers on a pad 53 mm across are not three clean touches to the
+ * device: as they move, two of them merge for a frame or two, or one lifts a
+ * hair, and the count reads 2 -- and the swipe accumulator used to reset on
+ * every such frame, so on a short pad the threshold was rarely reached at
+ * all. A gesture that was three fingers a moment ago stays a three-finger
+ * gesture for this long at fewer.
+ */
+#define THREE_FINGER_FLICKER_GRACE_MS 250
 #define THREE_FINGER_TAP_MAX_MS CONFIG_INPUT_IQS9151_3F_TAP_MAX_MS
 #define THREE_FINGER_TAP_MOVE CONFIG_INPUT_IQS9151_3F_TAP_MOVE
 #define ONE_FINGER_TAP_MOVE CONFIG_INPUT_IQS9151_1F_TAP_MOVE
@@ -547,7 +558,18 @@ struct iqs9151_data {
     int32_t three_dy;
     uint16_t three_last_x;
     uint16_t three_last_y;
+    /* When the count last dropped below three mid-gesture; 0 = it has not. */
+    int64_t three_flicker_ms;
     uint16_t hold_button;
+    /*
+     * Cursor movement owed but not yet reported, and when the last report
+     * went out. See iqs9151_report_cursor: a half whose pointer travels over
+     * a BLE link has a rate the link can carry, and 200 frames a second is
+     * not it.
+     */
+    int32_t cursor_pending_x;
+    int32_t cursor_pending_y;
+    int64_t cursor_report_ms;
     struct iqs9151_finger_history_entry finger_history[IQS9151_FINGER_HISTORY_SIZE];
     uint8_t finger_history_head;
     uint8_t finger_history_count;
@@ -1873,6 +1895,19 @@ static void iqs9151_three_finger_reset(struct iqs9151_data *data) {
     data->three_dy = 0;
     data->three_last_x = 0;
     data->three_last_y = 0;
+    data->three_flicker_ms = 0;
+}
+
+static atomic_t iqs9151_swipe3_threshold_x = ATOMIC_INIT(THREE_FINGER_SWIPE_THRESHOLD_X);
+static atomic_t iqs9151_swipe3_threshold_y = ATOMIC_INIT(THREE_FINGER_SWIPE_THRESHOLD_Y);
+
+int iqs9151_set_swipe3_threshold(uint16_t x_counts, uint16_t y_counts) {
+    if (x_counts == 0U || y_counts == 0U) {
+        return -EINVAL;
+    }
+    atomic_set(&iqs9151_swipe3_threshold_x, (atomic_val_t)x_counts);
+    atomic_set(&iqs9151_swipe3_threshold_y, (atomic_val_t)y_counts);
+    return 0;
 }
 
 static bool iqs9151_three_finger_update(struct iqs9151_data *data,
@@ -1938,21 +1973,44 @@ static bool iqs9151_three_finger_update(struct iqs9151_data *data,
     data->three_finger_one_lead_valid = false;
     data->three_finger_two_lead_valid = false;
 
-    if (frame->finger_count == 3U) {
+    /*
+     * A frame at two (or one) fingers inside the grace window is treated as
+     * the three-finger frame it almost certainly is. The tap paths below are
+     * not affected: they only apply to a gesture that has not moved, and this
+     * only holds a gesture that is being held or swiped.
+     */
+    bool flicker_frame = false;
+    if (data->three_active && frame->finger_count > 0U && frame->finger_count < 3U &&
+        !data->three_tapdrag_second_touch && !data->three_tap_candidate) {
+        if (data->three_flicker_ms == 0) {
+            data->three_flicker_ms = now_ms;
+        }
+        flicker_frame = (now_ms - data->three_flicker_ms) <= THREE_FINGER_FLICKER_GRACE_MS;
+    }
+
+    if (frame->finger_count == 3U || flicker_frame) {
         const int64_t elapsed = now_ms - data->three_down_ms;
 
+        if (frame->finger_count == 3U) {
+            data->three_flicker_ms = 0;
+        }
         if (data->three_release_pending) {
             data->three_release_pending = false;
             data->three_release_pending_ms = 0;
         }
 
+        /* The device's own relative movement of its first finger, rather than
+         * differences of that finger's absolute position: when fingers merge
+         * and split the device renumbers them, and a difference then jumps by
+         * the distance between two fingers while the relative report simply
+         * reads zero for a frame. */
+        if (frame->finger_count >= 2U) {
+            /* Not at one: a single finger's report has been through the
+             * cursor gain by now and is in different units. */
+            data->three_dx += frame->rel_x;
+            data->three_dy += frame->rel_y;
+        }
         if (finger1_valid) {
-            if (data->three_have_last) {
-                const int32_t dx = (int32_t)frame->finger1_x - (int32_t)data->three_last_x;
-                const int32_t dy = (int32_t)frame->finger1_y - (int32_t)data->three_last_y;
-                data->three_dx += dx;
-                data->three_dy += dy;
-            }
             data->three_last_x = frame->finger1_x;
             data->three_last_y = frame->finger1_y;
             data->three_have_last = true;
@@ -1977,15 +2035,17 @@ static bool iqs9151_three_finger_update(struct iqs9151_data *data,
         if (!data->three_swipe_sent && !data->three_hold_sent) {
             const int32_t swipe_dx = IQS9151_SWIPE_SIGN_X * data->three_dx;
             const int32_t swipe_dy = IQS9151_SWIPE_SIGN_Y * data->three_dy;
+            const int32_t threshold_x = (int32_t)atomic_get(&iqs9151_swipe3_threshold_x);
+            const int32_t threshold_y = (int32_t)atomic_get(&iqs9151_swipe3_threshold_y);
 
-            if (iqs9151_abs32(swipe_dx) >= THREE_FINGER_SWIPE_THRESHOLD_X &&
+            if (iqs9151_abs32(swipe_dx) >= threshold_x &&
                 iqs9151_abs32(swipe_dx) >= iqs9151_abs32(swipe_dy)) {
                 const uint16_t key = (swipe_dx < 0) ? INPUT_BTN_4 : INPUT_BTN_3;
                 iqs9151_report_key_event(dev, key, true, true, K_FOREVER);
                 iqs9151_report_key_event(dev, key, false, true, K_FOREVER);
                 data->three_swipe_sent = true;
                 return true;
-            } else if (iqs9151_abs32(swipe_dy) >= THREE_FINGER_SWIPE_THRESHOLD_Y &&
+            } else if (iqs9151_abs32(swipe_dy) >= threshold_y &&
                        iqs9151_abs32(swipe_dy) > iqs9151_abs32(swipe_dx)) {
                 const uint16_t key = (swipe_dy < 0) ? INPUT_BTN_5 : INPUT_BTN_6;
                 iqs9151_report_key_event(dev, key, true, true, K_FOREVER);
@@ -2583,16 +2643,21 @@ static bool iqs9151_update_gesture_sessions(struct iqs9151_data *data,
         (void)iqs9151_three_finger_update(data, frame, prev_frame, dev);
     }
 
+    /* A three-finger gesture that is waiting out a release, or riding out the
+     * device's count dropping for a frame, owns the fingers it still has. */
+    const bool three_holds_on =
+        data->three_active && (data->three_release_pending || data->three_flicker_ms != 0);
+
     switch (frame->finger_count) {
     case 1U:
         if (!(data->two_finger.active && data->two_finger.release_pending)) {
-            if (!(data->three_active && data->three_release_pending)) {
+            if (!three_holds_on) {
                 released_from_hold = iqs9151_one_finger_update(data, frame, prev_frame, dev);
             }
         }
         break;
     case 2U:
-        if (!(data->three_active && data->three_release_pending)) {
+        if (!three_holds_on) {
             iqs9151_two_finger_update(data, frame, prev_frame, dev, two_result);
         }
         break;
@@ -2686,11 +2751,65 @@ static void iqs9151_update_inertia_ema(struct iqs9151_data *data,
     }
 }
 
-static void iqs9151_report_frame_events(const struct device *dev,
+static atomic_t iqs9151_cursor_report_interval_ms =
+    ATOMIC_INIT(CONFIG_INPUT_IQS9151_CURSOR_REPORT_INTERVAL_MS);
+
+int iqs9151_set_cursor_report_interval(uint16_t ms) {
+    atomic_set(&iqs9151_cursor_report_interval_ms, (atomic_val_t)MIN(ms, 100U));
+    return 0;
+}
+
+/*
+ * Report cursor movement, at most once per interval.
+ *
+ * The device delivers a frame every 5 ms and each carried two input events,
+ * which on the peripheral half is two BLE notifications per frame -- four
+ * hundred a second into a link that carries perhaps a hundred. Nothing was
+ * lost, only queued, and a queue is lag: the pointer on that half trailed the
+ * finger by a growing fraction of a second, and the half's key presses,
+ * waiting in the same queue, arrived late enough to mistype. Before the
+ * cursor was gated on real movement rather than the device's movement bit,
+ * only one frame in sixteen got through and the link never noticed.
+ *
+ * So movement is owed rather than sent: added up and reported when the
+ * interval has passed, in one or two events with the sync on the last, and
+ * immediately when the frame is anything but a cursor frame. 0 reports every
+ * frame, which is right for the half on USB.
+ */
+static void iqs9151_report_cursor(struct iqs9151_data *data, int32_t dx, int32_t dy,
+                                  int64_t now_ms, bool flush) {
+    const struct device *dev = data->dev;
+    const int64_t interval = (int64_t)atomic_get(&iqs9151_cursor_report_interval_ms);
+
+    data->cursor_pending_x += dx;
+    data->cursor_pending_y += dy;
+    if (data->cursor_pending_x == 0 && data->cursor_pending_y == 0) {
+        return;
+    }
+    if (!flush && interval > 0 && (now_ms - data->cursor_report_ms) < interval) {
+        return;
+    }
+
+    const int32_t x = data->cursor_pending_x;
+    const int32_t y = data->cursor_pending_y;
+    data->cursor_pending_x = 0;
+    data->cursor_pending_y = 0;
+    data->cursor_report_ms = now_ms;
+
+    if (x != 0) {
+        iqs9151_report_rel_event(dev, INPUT_REL_X, x, y == 0, K_NO_WAIT);
+    }
+    if (y != 0) {
+        iqs9151_report_rel_event(dev, INPUT_REL_Y, y, true, K_NO_WAIT);
+    }
+}
+
+static void iqs9151_report_frame_events(struct iqs9151_data *data,
                                         const struct iqs9151_frame *frame,
                                         const struct iqs9151_two_finger_result *two_result,
                                         bool cursor_moving,
-                                        bool suppress_cursor_tail) {
+                                        bool suppress_cursor_tail, int64_t now_ms) {
+    const struct device *dev = data->dev;
     /*
      * Tapped rather than held, like the three-finger swipes: the gesture is
      * over by the time it is recognised, so there is nothing left to hold.
@@ -2723,9 +2842,13 @@ static void iqs9151_report_frame_events(const struct device *dev,
         if (have_y) {
             iqs9151_report_rel_event(dev, INPUT_REL_WHEEL, two_result->scroll_y, true, K_NO_WAIT);
         }
-    } else if (frame->finger_count == 1U && cursor_moving && !suppress_cursor_tail) {
-        iqs9151_report_rel_event(dev, INPUT_REL_X, frame->rel_x, false, K_NO_WAIT);
-        iqs9151_report_rel_event(dev, INPUT_REL_Y, frame->rel_y, true, K_NO_WAIT);
+    } else if (frame->finger_count == 1U && cursor_moving && !suppress_cursor_tail &&
+               !data->three_active) {
+        iqs9151_report_cursor(data, frame->rel_x, frame->rel_y, now_ms, false);
+    } else {
+        /* Not a cursor frame: whatever is owed goes out now rather than
+         * arriving after the finger has changed its mind. */
+        iqs9151_report_cursor(data, 0, 0, now_ms, true);
     }
 }
 
@@ -2789,8 +2912,8 @@ static void iqs9151_process_frame(struct iqs9151_data *data,
         iqs9151_motion_history_reset(&data->cursor_motion_history);
     }
 
-    iqs9151_report_frame_events(dev, frame, &two_result, cursor_moving,
-                                suppress_cursor_tail);
+    iqs9151_report_frame_events(data, frame, &two_result, cursor_moving,
+                                suppress_cursor_tail, now_ms);
 
     LOG_DBG("rel x=%d y=%d info=0x%04x tp=0x%04x finger=%d f1x=%u f1y=%u f2x=%u f2y=%u",
             frame->rel_x, frame->rel_y, frame->info_flags, frame->trackpad_flags,

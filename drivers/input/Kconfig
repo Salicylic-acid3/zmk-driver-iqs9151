@@ -125,6 +125,24 @@ config INPUT_IQS9151_CURSOR_GAIN_Y_X10
       Raising one axis and lowering the other keeps the overall pointer speed
       roughly where it was while changing the balance between them.
 
+config INPUT_IQS9151_CURSOR_REPORT_INTERVAL_MS
+    int "IQS9151 report pointer movement at most this often, in ms (0 = every frame)"
+    range 0 100
+    default 0
+    help
+      Movement between reports is added up, not dropped, so nothing is lost;
+      it arrives in fewer, larger reports, at most this many milliseconds
+      apart, and immediately when the finger lifts or a gesture begins.
+
+      For a split half whose pointer crosses a BLE link. The device delivers
+      a frame every 5 ms and each is two input events, and a peripheral
+      relays each event as its own notification: four hundred a second into
+      a link that carries perhaps a hundred. The rest queue, and a queue is
+      lag -- the pointer trails the finger, and the half's key presses,
+      waiting behind them, arrive late enough to mistype. 15 matches the
+      link's cadence and costs at most 15 ms of latency. Leave it 0 on the
+      half that talks to the host directly. Also a runtime setting.
+
 config INPUT_IQS9151_CURSOR_SMOOTHING
     int "IQS9151 spread each report's pointer movement over this many reports"
     range 1 8

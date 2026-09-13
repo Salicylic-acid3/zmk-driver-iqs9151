@@ -26,6 +26,7 @@
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #include <zmk/keymap.h>
+#include <keebon/iqs9151/settings.h>
 #include <zmk/behavior.h>
 #include <zmk/virtual_key_position.h>
 
@@ -136,7 +137,10 @@ static int dual_pad_handle_event(const struct device *dev, struct input_event *e
     const uint8_t side = param1 ? 1 : 0;
     const bool invert_scroll =
         cfg->invert_scroll != ((param2 & DUAL_PAD_FLAG_INVERT_SCROLL) != 0);
-    const bool invert_zoom = cfg->invert_zoom != ((param2 & DUAL_PAD_FLAG_INVERT_ZOOM) != 0);
+    /* The same switch as the one-pad pinch: a zoom is a zoom, whichever
+     * hands do it, and the app has one place to turn it round. */
+    const bool invert_zoom = (cfg->invert_zoom != ((param2 & DUAL_PAD_FLAG_INVERT_ZOOM) != 0)) !=
+                             iqs9151_setting_pinch_invert();
 
     if (event->type == INPUT_EV_KEY && event->code == cfg->touch_code) {
         const bool touched = event->value != 0;

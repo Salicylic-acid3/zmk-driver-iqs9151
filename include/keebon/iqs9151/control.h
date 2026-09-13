@@ -106,6 +106,25 @@ int iqs9151_set_cursor_distance_smoothing(uint16_t counts);
 int iqs9151_set_ripple_period(uint16_t x_tenths, uint16_t y_tenths);
 
 /**
+ * Report pointer movement at most once per interval; 0 reports every frame.
+ *
+ * Movement in between is added up, so a slower cadence loses nothing but
+ * costs up to that many milliseconds of latency. For a split half whose
+ * pointer crosses a BLE link, which cannot carry a report per frame.
+ *
+ * @retval 0 always; values above 100 are treated as 100.
+ */
+int iqs9151_set_cursor_report_interval(uint16_t ms);
+
+/**
+ * How far three fingers must travel before the movement is a swipe, per
+ * sensor axis, in counts.
+ *
+ * @retval 0 on success, -EINVAL if either is zero.
+ */
+int iqs9151_set_swipe3_threshold(uint16_t x_counts, uint16_t y_counts);
+
+/**
  * Let the driver find each axis's ripple period by itself.
  *
  * A bank of candidate periods learns alongside the equaliser and the one
