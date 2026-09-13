@@ -88,6 +88,22 @@ int iqs9151_set_cursor_smoothing(uint16_t reports);
 int iqs9151_set_cursor_distance_smoothing(uint16_t counts);
 
 /**
+ * Period of the device's positional ripple per axis, in counts; 0 turns that
+ * axis's equaliser off.
+ *
+ * The reported position carries a wave fixed to where the finger is over the
+ * electrodes -- half an electrode pitch long -- and this is what divides it out
+ * of every report without lag, learning the wave's shape by itself from the
+ * first stroke. The period is resolution / (2 x electrodes) on that axis, 76
+ * on the ErgoTrack's X; a few percent off halves the effect. Changing a period
+ * discards what was learned for that axis.
+ *
+ * @retval 0 on success.
+ * @retval -EINVAL if either period exceeds the driver's table.
+ */
+int iqs9151_set_ripple_period(uint16_t x_counts, uint16_t y_counts);
+
+/**
  * The device's own low-speed filtering, as one block.
  *
  * Every field maps to a register in the 0x11EA..0x11F4 run of the trackpad

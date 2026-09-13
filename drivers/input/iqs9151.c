@@ -357,6 +357,47 @@ struct iqs9151_dist_smoother {
     int32_t rem_fp; /* output carry, in 1/256 of a count */
 };
 
+/*
+ * Self-calibrating equaliser for the device's positional ripple.
+ *
+ * Measured on the pad: the reported position, against where the finger really
+ * is, carries a wave that repeats every half electrode pitch on the coarse
+ * axis -- 76 counts, 3.3 mm -- and swings the reported speed better than two to
+ * one, deeper the slower the finger crawls. It is a fixed function of where
+ * the finger is (the phase within one electrode), which is the one thing the
+ * driver also knows: the absolute coordinate arrives with every frame.
+ *
+ * So rather than average it away after the fact (a distance window one period
+ * long does that perfectly and costs half a period of lag, which is what the
+ * hand objected to), model it and divide it out, frame by frame, with no lag:
+ * reported speed = true speed x g(phase), g = 1 + a1 cos + b1 sin + a2 cos2 +
+ * b2 sin2, and the pointer gets rel / g. The coefficients are learned on the
+ * fly by LMS from the ratio of each report to a one-period distance average --
+ * that average is used only as the reference to learn from, never for output --
+ * so every unit calibrates itself in about one stroke, and keeps the answer
+ * while the finger is up. A correction table indexed by phase is rebuilt every
+ * few updates and normalised so the mean of 1/g over a period is exactly one,
+ * which is what keeps a stroke's total travel the same with and without this.
+ *
+ * Only the period has to be told to it, in the device's counts. On this pad it
+ * is X_RESOLUTION / (2 x 13 electrodes) = 76; a few percent off halves the
+ * cancellation, so it is a runtime setting to be nudged by feel.
+ */
+#define IQS9151_RIPPLE_MAX_PERIOD 160
+#define IQS9151_RIPPLE_MU_SHIFT 6      /* LMS step 1/64 */
+#define IQS9151_RIPPLE_NORM_EVERY 16   /* rebuild the correction table this often */
+#define IQS9151_RIPPLE_COEF_LIMIT 29491 /* 0.9 in Q15: g never crosses zero */
+#define IQS9151_RIPPLE_G_FLOOR 3277     /* 0.1 in Q15 */
+
+struct iqs9151_ripple_eq {
+    int32_t a1, b1, a2, b2;                         /* Q15 */
+    uint16_t corr[IQS9151_RIPPLE_MAX_PERIOD];       /* Q8 correction per phase */
+    struct iqs9151_dist_smoother ref;               /* one-period reference average */
+    int32_t rem_fp;                                 /* output carry, 1/256 count */
+    uint16_t tick;
+    uint16_t period;                                /* 0 = off */
+};
+
 struct iqs9151_data {
     const struct device *dev;
     struct gpio_callback gpio_cb;
@@ -435,6 +476,9 @@ struct iqs9151_data {
      */
     struct iqs9151_dist_smoother dist_smoother_x;
     struct iqs9151_dist_smoother dist_smoother_y;
+    /* Positional ripple equalisers, one per axis. See struct iqs9151_ripple_eq. */
+    struct iqs9151_ripple_eq ripple_x;
+    struct iqs9151_ripple_eq ripple_y;
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_MOTION_TRACE)
     int64_t trace_last_read_ms;
     uint16_t trace_quiet;
@@ -2844,6 +2888,149 @@ static int16_t iqs9151_distance_smooth_axis(struct iqs9151_dist_smoother *s, int
     return (int16_t)CLAMP(out, INT16_MIN, INT16_MAX);
 }
 
+/* sin(2*pi*i/128) in Q15. cos is the same table a quarter turn on. */
+static const int16_t iqs9151_sin_q15[128] = {
+         0,   1608,   3212,   4808,   6393,   7962,   9512,  11039,
+     12539,  14010,  15446,  16846,  18204,  19519,  20787,  22005,
+     23170,  24279,  25329,  26319,  27245,  28105,  28898,  29621,
+     30273,  30852,  31356,  31785,  32137,  32412,  32609,  32728,
+     32767,  32728,  32609,  32412,  32137,  31785,  31356,  30852,
+     30273,  29621,  28898,  28105,  27245,  26319,  25329,  24279,
+     23170,  22005,  20787,  19519,  18204,  16846,  15446,  14010,
+     12539,  11039,   9512,   7962,   6393,   4808,   3212,   1608,
+         0,  -1608,  -3212,  -4808,  -6393,  -7962,  -9512, -11039,
+    -12539, -14010, -15446, -16846, -18204, -19519, -20787, -22005,
+    -23170, -24279, -25329, -26319, -27245, -28105, -28898, -29621,
+    -30273, -30852, -31356, -31785, -32137, -32412, -32609, -32728,
+    -32767, -32728, -32609, -32412, -32137, -31785, -31356, -30852,
+    -30273, -29621, -28898, -28105, -27245, -26319, -25329, -24279,
+    -23170, -22005, -20787, -19519, -18204, -16846, -15446, -14010,
+    -12539, -11039,  -9512,  -7962,  -6393,  -4808,  -3212,  -1608,
+};
+
+static atomic_t iqs9151_ripple_period_x = ATOMIC_INIT(CONFIG_INPUT_IQS9151_RIPPLE_PERIOD_X);
+static atomic_t iqs9151_ripple_period_y = ATOMIC_INIT(CONFIG_INPUT_IQS9151_RIPPLE_PERIOD_Y);
+
+int iqs9151_set_ripple_period(uint16_t x_counts, uint16_t y_counts) {
+    if (x_counts > IQS9151_RIPPLE_MAX_PERIOD || y_counts > IQS9151_RIPPLE_MAX_PERIOD) {
+        return -EINVAL;
+    }
+    atomic_set(&iqs9151_ripple_period_x, (atomic_val_t)x_counts);
+    atomic_set(&iqs9151_ripple_period_y, (atomic_val_t)y_counts);
+    return 0;
+}
+
+/* Everything, including what was learned: a new period means a new wave. */
+static void iqs9151_ripple_reset(struct iqs9151_ripple_eq *eq, uint16_t period) {
+    eq->a1 = eq->b1 = eq->a2 = eq->b2 = 0;
+    for (size_t i = 0; i < IQS9151_RIPPLE_MAX_PERIOD; i++) {
+        eq->corr[i] = 256U;
+    }
+    iqs9151_dist_smoother_reset(&eq->ref);
+    eq->rem_fp = 0;
+    eq->tick = 0;
+    eq->period = period;
+}
+
+/* Only the per-stroke state; the learned coefficients are the calibration. */
+static void iqs9151_ripple_lift(struct iqs9151_ripple_eq *eq) {
+    iqs9151_dist_smoother_reset(&eq->ref);
+    eq->rem_fp = 0;
+}
+
+/* cos and sin of (2*pi*phase/period), Q15, through the 128-entry table. */
+static void iqs9151_ripple_basis(uint16_t phase, uint16_t period, int32_t *c, int32_t *s) {
+    const uint32_t idx = ((uint32_t)phase * 128U) / period;
+    *s = iqs9151_sin_q15[idx & 127U];
+    *c = iqs9151_sin_q15[(idx + 32U) & 127U];
+}
+
+/* g(phase) = 1 + a1 cos + b1 sin + a2 cos2 + b2 sin2, Q15, floored above zero. */
+static int32_t iqs9151_ripple_g(const struct iqs9151_ripple_eq *eq, uint16_t phase) {
+    int32_t c1, s1, c2, s2;
+    iqs9151_ripple_basis(phase, eq->period, &c1, &s1);
+    iqs9151_ripple_basis((uint16_t)((2U * phase) % eq->period), eq->period, &c2, &s2);
+
+    const int64_t sum = (int64_t)eq->a1 * c1 + (int64_t)eq->b1 * s1 + (int64_t)eq->a2 * c2 +
+                        (int64_t)eq->b2 * s2;
+    const int32_t g = 32768 + (int32_t)(sum >> 15);
+    return MAX(IQS9151_RIPPLE_G_FLOOR, g);
+}
+
+/*
+ * 1/g per phase, scaled so its mean over the period is exactly 256: dividing
+ * a ripple out must not also change how far a stroke goes.
+ */
+static void iqs9151_ripple_rebuild(struct iqs9151_ripple_eq *eq) {
+    /* Two passes rather than a table on the stack: this runs on the system
+     * work queue, whose stack is already the tightest thing on this board. */
+    uint32_t total = 0;
+    for (uint16_t p = 0; p < eq->period; p++) {
+        total += (1U << 24) / (uint32_t)iqs9151_ripple_g(eq, p);
+    }
+    const uint32_t mean = MAX(1U, total / eq->period);
+    for (uint16_t p = 0; p < eq->period; p++) {
+        const uint32_t recip = (1U << 24) / (uint32_t)iqs9151_ripple_g(eq, p);
+        eq->corr[p] = (uint16_t)MIN(65535U, (recip * 256U) / mean);
+    }
+}
+
+static int16_t iqs9151_ripple_apply(struct iqs9151_ripple_eq *eq, uint16_t abs_pos, int16_t value,
+                                    uint16_t period) {
+    if (period == 0U) {
+        if (eq->period != 0U) {
+            iqs9151_ripple_reset(eq, 0);
+        }
+        return value;
+    }
+    if (eq->period != period) {
+        iqs9151_ripple_reset(eq, period);
+    }
+
+    const uint16_t phase = abs_pos % period;
+
+    /* The reference: this axis's movement averaged over the last period of
+     * travel, which is what the finger really did with the ripple summed out. */
+    (void)iqs9151_distance_smooth_axis(&eq->ref, value, period);
+
+    /* Learn only once the reference spans a whole period. The ratio of this
+     * report to that average is one noisy sample of g(phase); LMS on four
+     * sinusoidal regressors averages the noise out in about a stroke. */
+    if (eq->ref.dist >= period && eq->ref.count > 0 && eq->ref.sum != 0) {
+        const int32_t mag = (value < 0) ? -(int32_t)value : (int32_t)value;
+        const int32_t ref_sum = (eq->ref.sum < 0) ? -eq->ref.sum : eq->ref.sum;
+        /* sample = mag / (sum/count), in Q15; ordered so it stays in 32 bits. */
+        int32_t sample = (mag * (int32_t)eq->ref.count * 32768) / ref_sum;
+        sample = MIN(sample, 4 * 32768);
+
+        const int32_t e = (sample - iqs9151_ripple_g(eq, phase)) >> IQS9151_RIPPLE_MU_SHIFT;
+        int32_t c1, s1, c2, s2;
+        iqs9151_ripple_basis(phase, period, &c1, &s1);
+        iqs9151_ripple_basis((uint16_t)((2U * phase) % period), period, &c2, &s2);
+
+        eq->a1 = CLAMP(eq->a1 + ((e * c1) >> 15), -IQS9151_RIPPLE_COEF_LIMIT,
+                       IQS9151_RIPPLE_COEF_LIMIT);
+        eq->b1 = CLAMP(eq->b1 + ((e * s1) >> 15), -IQS9151_RIPPLE_COEF_LIMIT,
+                       IQS9151_RIPPLE_COEF_LIMIT);
+        eq->a2 = CLAMP(eq->a2 + ((e * c2) >> 15), -IQS9151_RIPPLE_COEF_LIMIT / 2,
+                       IQS9151_RIPPLE_COEF_LIMIT / 2);
+        eq->b2 = CLAMP(eq->b2 + ((e * s2) >> 15), -IQS9151_RIPPLE_COEF_LIMIT / 2,
+                       IQS9151_RIPPLE_COEF_LIMIT / 2);
+
+        if (++eq->tick >= IQS9151_RIPPLE_NORM_EVERY) {
+            eq->tick = 0;
+            iqs9151_ripple_rebuild(eq);
+        }
+    }
+
+    /* Divide the ripple out of this report, carrying the fraction. */
+    eq->rem_fp += (int32_t)value * (int32_t)eq->corr[phase];
+    int32_t out = eq->rem_fp / 256; /* toward zero; the carry keeps its sign */
+    eq->rem_fp -= out * 256;
+
+    return (int16_t)CLAMP(out, INT16_MIN, INT16_MAX);
+}
+
 static void iqs9151_apply_cursor_gain(struct iqs9151_data *data,
                                       struct iqs9151_frame *frame) {
     if (frame->finger_count != 1U) {
@@ -2858,8 +3045,19 @@ static void iqs9151_apply_cursor_gain(struct iqs9151_data *data,
         data->cursor_gain_remainder_y = 0;
         iqs9151_dist_smoother_reset(&data->dist_smoother_x);
         iqs9151_dist_smoother_reset(&data->dist_smoother_y);
+        /* The equalisers keep what they learned; only the stroke state goes. */
+        iqs9151_ripple_lift(&data->ripple_x);
+        iqs9151_ripple_lift(&data->ripple_y);
         return;
     }
+
+    /* First, because it is the only stage that needs the absolute position,
+     * and because the ripple lives in the raw counts: everything after this
+     * sees a report with the wave already divided out. */
+    frame->rel_x = iqs9151_ripple_apply(&data->ripple_x, frame->finger1_x, frame->rel_x,
+                                        (uint16_t)atomic_get(&iqs9151_ripple_period_x));
+    frame->rel_y = iqs9151_ripple_apply(&data->ripple_y, frame->finger1_y, frame->rel_y,
+                                        (uint16_t)atomic_get(&iqs9151_ripple_period_y));
 
     const int32_t window = (int32_t)atomic_get(&iqs9151_cursor_distance_window);
     frame->rel_x = iqs9151_distance_smooth_axis(&data->dist_smoother_x, frame->rel_x, window);

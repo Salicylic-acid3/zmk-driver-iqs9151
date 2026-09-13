@@ -174,6 +174,33 @@ config INPUT_IQS9151_CURSOR_DISTANCE_SMOOTHING
       crawl. Measure the period first (the counting tool reports it); guessing
       high just adds lag without cancelling anything.
 
+config INPUT_IQS9151_RIPPLE_PERIOD_X
+    int "IQS9151 positional ripple period on the sensor X axis, in counts (0 = off)"
+    range 0 160
+    default 0
+    help
+      Enables a self-calibrating equaliser for the device's positional ripple
+      on this axis. The reported position carries a wave, fixed to where the
+      finger is over the electrodes, that repeats every half electrode pitch
+      and can swing the reported speed better than two to one on a coarse
+      axis. Given its period, the driver learns the wave's shape from the
+      first stroke and divides it out of every report -- with no lag, unlike
+      averaging it away -- and keeps the answer while the finger is up.
+
+      The period is X_RESOLUTION / (2 x electrodes along X): 1974 / 26 = 76 on
+      the ClickBoard ErgoTrack. A few percent off halves the cancellation, so
+      it is also a runtime setting to be nudged by feel. Measure it with the
+      counting tool first; the wave is on the coarse axis only, so leave the
+      other axis at 0 unless it too measures a period.
+
+config INPUT_IQS9151_RIPPLE_PERIOD_Y
+    int "IQS9151 positional ripple period on the sensor Y axis, in counts (0 = off)"
+    range 0 160
+    default 0
+    help
+      As INPUT_IQS9151_RIPPLE_PERIOD_X, for the sensor's Y axis. Y_RESOLUTION /
+      (2 x electrodes along Y) if that axis measures a ripple; 0 if it does not.
+
 config INPUT_IQS9151_RECOVERY_STACK_SIZE
     int "IQS9151 reset-recovery thread stack size"
     default 1536
