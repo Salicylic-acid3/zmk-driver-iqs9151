@@ -88,20 +88,21 @@ int iqs9151_set_cursor_smoothing(uint16_t reports);
 int iqs9151_set_cursor_distance_smoothing(uint16_t counts);
 
 /**
- * Period of the device's positional ripple per axis, in counts; 0 turns that
- * axis's equaliser off.
+ * Period of the device's positional ripple per axis, in tenths of a count; 0
+ * turns that axis's equaliser off.
  *
  * The reported position carries a wave fixed to where the finger is over the
  * electrodes -- half an electrode pitch long -- and this is what divides it out
  * of every report without lag, learning the wave's shape by itself from the
- * first stroke. The period is resolution / (2 x electrodes) on that axis, 76
- * on the ErgoTrack's X; a few percent off halves the effect. Changing a period
+ * first stroke. Geometry puts the period at resolution / (2 x electrodes),
+ * 76.0 on the ErgoTrack's X; the pad measures 72 to 74, and five percent off
+ * halves the effect, hence tenths: 730 is 73.0 counts. Changing a period
  * discards what was learned for that axis.
  *
  * @retval 0 on success.
- * @retval -EINVAL if either period exceeds the driver's table.
+ * @retval -EINVAL if either period exceeds 1600 (160.0 counts).
  */
-int iqs9151_set_ripple_period(uint16_t x_counts, uint16_t y_counts);
+int iqs9151_set_ripple_period(uint16_t x_tenths, uint16_t y_tenths);
 
 /**
  * The device's own low-speed filtering, as one block.

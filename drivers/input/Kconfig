@@ -174,9 +174,9 @@ config INPUT_IQS9151_CURSOR_DISTANCE_SMOOTHING
       crawl. Measure the period first (the counting tool reports it); guessing
       high just adds lag without cancelling anything.
 
-config INPUT_IQS9151_RIPPLE_PERIOD_X
-    int "IQS9151 positional ripple period on the sensor X axis, in counts (0 = off)"
-    range 0 160
+config INPUT_IQS9151_RIPPLE_PERIOD_X_X10
+    int "IQS9151 positional ripple period on the sensor X axis, in tenths of a count (0 = off)"
+    range 0 1600
     default 0
     help
       Enables a self-calibrating equaliser for the device's positional ripple
@@ -187,19 +187,23 @@ config INPUT_IQS9151_RIPPLE_PERIOD_X
       first stroke and divides it out of every report -- with no lag, unlike
       averaging it away -- and keeps the answer while the finger is up.
 
-      The period is X_RESOLUTION / (2 x electrodes along X): 1974 / 26 = 76 on
-      the ClickBoard ErgoTrack. A few percent off halves the cancellation, so
-      it is also a runtime setting to be nudged by feel. Measure it with the
-      counting tool first; the wave is on the coarse axis only, so leave the
-      other axis at 0 unless it too measures a period.
+      In tenths of a count: 730 is a period of 73.0 counts. The geometry says
+      X_RESOLUTION / (2 x electrodes along X) = 1974 / 26 = 76.0 on the
+      ClickBoard ErgoTrack; the pad, measured, says 72 to 74. The difference
+      matters: five percent off halves the cancellation and ten percent undoes
+      it, which is why the unit is tenths and why it is also a runtime setting.
+      Find the value by scanning half a count at a time with the counting tool
+      open. The wave is on the coarse axis only, so leave the other axis at 0
+      unless it too measures a period.
 
-config INPUT_IQS9151_RIPPLE_PERIOD_Y
-    int "IQS9151 positional ripple period on the sensor Y axis, in counts (0 = off)"
-    range 0 160
+config INPUT_IQS9151_RIPPLE_PERIOD_Y_X10
+    int "IQS9151 positional ripple period on the sensor Y axis, in tenths of a count (0 = off)"
+    range 0 1600
     default 0
     help
-      As INPUT_IQS9151_RIPPLE_PERIOD_X, for the sensor's Y axis. Y_RESOLUTION /
-      (2 x electrodes along Y) if that axis measures a ripple; 0 if it does not.
+      As INPUT_IQS9151_RIPPLE_PERIOD_X_X10, for the sensor's Y axis. Ten times
+      Y_RESOLUTION / (2 x electrodes along Y) as a starting point if that axis
+      measures a ripple; 0 if it does not.
 
 config INPUT_IQS9151_RECOVERY_STACK_SIZE
     int "IQS9151 reset-recovery thread stack size"

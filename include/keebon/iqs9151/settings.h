@@ -86,11 +86,14 @@
  * any speed. See iqs9151_set_cursor_distance_smoothing in control.h. */
 #define IQS9151_SETTING_CURSOR_DISTANCE_SMOOTHING_KEY "cursor_distance_smoothing"
 
-/* Period of the positional ripple per axis, in counts; 0 is off. The
- * self-calibrating, lag-free alternative to the distance window above. See
- * iqs9151_set_ripple_period in control.h. */
-#define IQS9151_SETTING_RIPPLE_PERIOD_X_KEY "ripple_period_x"
-#define IQS9151_SETTING_RIPPLE_PERIOD_Y_KEY "ripple_period_y"
+/* Period of the positional ripple per axis, in tenths of a count; 0 is off.
+ * The self-calibrating, lag-free alternative to the distance window above.
+ * Tenths because the equaliser needs the period to within a percent or two,
+ * and the pad's real period is not a whole number. See iqs9151_set_ripple_period
+ * in control.h. (The earlier whole-count keys "ripple_period_x/y" are retired
+ * rather than reinterpreted, so a stored 76 cannot silently become 7.6.) */
+#define IQS9151_SETTING_RIPPLE_PERIOD_X_X10_KEY "ripple_period_x_x10"
+#define IQS9151_SETTING_RIPPLE_PERIOD_Y_X10_KEY "ripple_period_y_x10"
 
 /*
  * The device's own low-speed filter block, one key per register. See
