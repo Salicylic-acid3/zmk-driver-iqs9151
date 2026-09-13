@@ -169,6 +169,38 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
     ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
 /*
+ * What the search concluded, written by the driver rather than the owner.
+ * There is no read-only permission, so the app draws these as text rather
+ * than a box; a write from outside is harmless, since the driver's own copy
+ * is what it uses and the next conclusion overwrites this one.
+ */
+ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
+    iqs9151_ripple_found_x, IQS9151_SETTINGS_SUBSYSTEM_ID,
+    IQS9151_SETTING_RIPPLE_FOUND_X_X10_KEY, ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+    ZMK_CUSTOM_SETTING_VALUE_INT32(0), ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
+    ZMK_CUSTOM_SETTING_RANGE_INT32(0, 1600));
+
+ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
+    iqs9151_ripple_found_y, IQS9151_SETTINGS_SUBSYSTEM_ID,
+    IQS9151_SETTING_RIPPLE_FOUND_Y_X10_KEY, ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+    ZMK_CUSTOM_SETTING_VALUE_INT32(0), ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
+    ZMK_CUSTOM_SETTING_RANGE_INT32(0, 1600));
+
+void iqs9151_setting_ripple_found(char axis, uint16_t period_x10) {
+    const struct zmk_custom_setting *setting =
+        (axis == 'y') ? &iqs9151_ripple_found_y : &iqs9151_ripple_found_x;
+    /* Persisted, so the app shows the same answer after a power cycle that
+     * the driver is working from (it remembers the period in flash too). */
+    const int ret = zmk_custom_setting_set_int32(setting, period_x10,
+                                                 ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST);
+    if (ret < 0) {
+        LOG_WRN("Could not publish ripple %c period (%d)", axis, ret);
+    }
+}
+
+/*
  * The device's own low-speed filtering. Six registers, six settings; the
  * ranges are the registers' widths. Pushed to the device as one block when any
  * of them changes -- see apply_filter.

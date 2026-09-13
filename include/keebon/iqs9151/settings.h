@@ -35,6 +35,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include <zephyr/sys/util.h>
 
@@ -99,6 +100,14 @@
  * starting point. See iqs9151_set_ripple_auto in control.h. */
 #define IQS9151_SETTING_RIPPLE_AUTO_KEY "ripple_auto"
 
+/* What the search found, per axis, in tenths of a count; 0 is nothing yet.
+ * Written by the driver, for the app to show -- the one way to tell, without
+ * a debug build, whether a pad has locked on to its wave or is still looking.
+ * Writing it from the app changes nothing: the driver keeps its own copy and
+ * overwrites this one the next time the search concludes. */
+#define IQS9151_SETTING_RIPPLE_FOUND_X_X10_KEY "ripple_found_x_x10"
+#define IQS9151_SETTING_RIPPLE_FOUND_Y_X10_KEY "ripple_found_y_x10"
+
 /* Report pointer movement at most this often, in ms; 0 is every frame. For a
  * half whose pointer crosses a BLE link. See iqs9151_set_cursor_report_interval
  * in control.h. */
@@ -126,6 +135,10 @@
 bool iqs9151_setting_one_hand_pinch(void);
 bool iqs9151_setting_pinch_invert(void);
 
+/* The driver reporting what its period search concluded ('x' or 'y'; 0 for
+ * nothing, or forgotten). Published as the ripple_found_* settings above. */
+void iqs9151_setting_ripple_found(char axis, uint16_t period_x10);
+
 #else
 
 static inline bool iqs9151_setting_one_hand_pinch(void) {
@@ -134,6 +147,11 @@ static inline bool iqs9151_setting_one_hand_pinch(void) {
 
 static inline bool iqs9151_setting_pinch_invert(void) {
     return IS_ENABLED(CONFIG_INPUT_IQS9151_2F_PINCH_INVERT);
+}
+
+static inline void iqs9151_setting_ripple_found(char axis, uint16_t period_x10) {
+    ARG_UNUSED(axis);
+    ARG_UNUSED(period_x10);
 }
 
 #endif /* CONFIG_INPUT_IQS9151_RUNTIME_SETTINGS */

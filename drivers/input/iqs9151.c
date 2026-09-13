@@ -3237,6 +3237,8 @@ static void iqs9151_ripple_remember(char axis, uint16_t period_x10) {
         LOG_WRN("ripple %c: could not save period (%d)", axis, ret);
     }
 #endif
+    /* And where the app can see it. */
+    iqs9151_setting_ripple_found(axis, period_x10);
 }
 
 static void iqs9151_ripple_scan_fine_around(struct iqs9151_ripple_scan *scan, uint16_t centre);
@@ -3598,7 +3600,9 @@ static int16_t iqs9151_ripple_apply(struct iqs9151_ripple_eq *eq, char axis, uin
         const bool changed = eq->scan.resolution != 0U;
         eq->scan.resolution = resolution;
         if (changed) {
-            iqs9151_ripple_remembered[(axis == 'y') ? 1 : 0] = 0;
+            /* Forgotten in flash too, or the old period would be back at
+             * the next boot. */
+            iqs9151_ripple_remember(axis, 0);
             iqs9151_ripple_scan_reset(&eq->scan, axis);
         }
     }
