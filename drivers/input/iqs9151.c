@@ -3895,26 +3895,28 @@ static void iqs9151_map_rebuild(struct iqs9151_ripple_map *map) {
      * it changes. Normalising by mean(g) instead is off by mean(g) x
      * mean(1/g), a tenth on a wave this deep.
      */
-    uint32_t inv[IQS9151_MAP_BINS]; /* 1/g in Q12 */
+    /* Two passes rather than a table of 1/g: this runs in the frame work,
+     * on the system work queue, and a kilobyte of locals there is a
+     * kilobyte closer to the overflow that reboots the half. */
     uint64_t sum = 0;
     uint32_t cnt = 0;
     for (size_t b = 0; b < IQS9151_MAP_BINS; b++) {
         if (map->n[b] >= IQS9151_MAP_MIN_SAMPLES && map->g[b] > 0) {
-            inv[b] = ((uint32_t)IQS9151_MAP_ONE * IQS9151_MAP_ONE + (uint32_t)map->g[b] / 2U) /
-                     (uint32_t)map->g[b];
-            sum += inv[b];
+            sum += ((uint32_t)IQS9151_MAP_ONE * IQS9151_MAP_ONE + (uint32_t)map->g[b] / 2U) /
+                   (uint32_t)map->g[b];
             cnt++;
-        } else {
-            inv[b] = 0;
         }
     }
     if (cnt == 0U) {
         return;
     }
-    const uint32_t mean_inv = (uint32_t)(sum / cnt);
+    const uint32_t mean_inv = MAX(1U, (uint32_t)(sum / cnt)); /* 1/g in Q12 */
     for (size_t b = 0; b < IQS9151_MAP_BINS; b++) {
-        if (inv[b] != 0U) {
-            map->corr[b] = (uint16_t)CLAMP((inv[b] * 256U + mean_inv / 2U) / mean_inv,
+        if (map->n[b] >= IQS9151_MAP_MIN_SAMPLES && map->g[b] > 0) {
+            const uint32_t inv =
+                ((uint32_t)IQS9151_MAP_ONE * IQS9151_MAP_ONE + (uint32_t)map->g[b] / 2U) /
+                (uint32_t)map->g[b];
+            map->corr[b] = (uint16_t)CLAMP((inv * 256U + mean_inv / 2U) / mean_inv,
                                            IQS9151_MAP_CORR_MIN, IQS9151_MAP_CORR_MAX);
         } else {
             map->corr[b] = 256;
@@ -4042,7 +4044,7 @@ static int16_t iqs9151_map_apply(struct iqs9151_ripple_map *map, char axis, uint
             for (size_t b = 0; b < IQS9151_MAP_BINS; b++) {
                 learned += (map->n[b] >= IQS9151_MAP_MIN_SAMPLES) ? 1U : 0U;
             }
-            char line[120];
+            char line[100];
             size_t at = 0;
             for (size_t b = 104; b < 128 && at + 5 < sizeof(line); b++) {
                 at += (size_t)snprintf(&line[at], sizeof(line) - at, " %u",
