@@ -989,6 +989,46 @@ static void iqs9151_wait_for_ready(const struct device *dev, uint16_t timeout_ms
     LOG_DBG("IRQGPIO=%d,TIME=%dms", gpio_pin_get_dt(&cfg->irq_gpio), elapsed);
 }
 
+/*
+ * Ask a device that is not in a communication window to open one.
+ *
+ * The configuration this driver writes puts the IQS9151 in event mode with the
+ * force-comms method set to "request a window" (Config Settings bit 4): with
+ * no finger on the pad RDY stays high, and an I2C transaction outside a window
+ * is refused rather than clock-stretched. That is the right setting while the
+ * pad is running -- but it is also the state the IC is left in when the MCU
+ * resets and the pad does not lose power: a watchdog reset, a wake from
+ * sys_poweroff on a key, a brownout the nRF noticed and the IC did not. The
+ * IC keeps its configuration, RDY never comes, the product-number read at the
+ * top of init fails, and the pad is dead until a power cycle -- keys working
+ * all the while, because they are the MCU's business, not the pad's.
+ *
+ * The request is the sequence in the datasheet's Figure 12.5 (v1.1, 12.9.2):
+ * a write of 0xFF, a write of the System Control address, a one-byte read.
+ * The IC then opens a window at its next cycle -- up to one LP2 sampling
+ * period, 200 ms as configured. A freshly powered IC streams and ACKs
+ * anyway, so sending this to one costs nothing.
+ */
+static int iqs9151_force_comms(const struct device *dev) {
+    const struct iqs9151_config *cfg = dev->config;
+    const uint8_t request = 0xFF;
+    uint8_t addr[2];
+    uint8_t dummy;
+
+    sys_put_le16(IQS9151_ADDR_SYSTEM_CONTROL, addr);
+
+    int ret = i2c_write_dt(&cfg->i2c, &request, sizeof(request));
+    if (ret == 0) {
+        ret = i2c_write_dt(&cfg->i2c, addr, sizeof(addr));
+    }
+    if (ret == 0) {
+        /* The read is the tail of the sequence; the byte it returns is not
+         * data, and a NAK on it is what the figure shows. */
+        (void)i2c_read_dt(&cfg->i2c, &dummy, sizeof(dummy));
+    }
+    return ret;
+}
+
 static int iqs9151_write_chunks(const struct device *dev, const struct iqs9151_config *cfg
                                     , uint16_t start_reg, const uint8_t *buf, size_t len) {
     size_t offset = 0U;
@@ -4506,7 +4546,22 @@ static int iqs9151_init(const struct device *dev) {
         return ret;
     }
 
-    iqs9151_wait_for_ready(dev, 1500);
+    /*
+     * A freshly powered IC is streaming and pulls RDY low within a few tens
+     * of milliseconds. One that kept its configuration across an MCU-only
+     * reset is in event mode and will not, with nothing on the pad -- see
+     * iqs9151_force_comms. Give it the short wait, then ask.
+     */
+    iqs9151_wait_for_ready(dev, 300);
+    if (!gpio_pin_get_dt(&cfg->irq_gpio)) {
+        LOG_WRN("No RDY after power-up: pad kept its state across an MCU reset; "
+                "requesting a communication window");
+        ret = iqs9151_force_comms(dev);
+        if (ret != 0) {
+            LOG_WRN("Communication window request refused (%d)", ret);
+        }
+        iqs9151_wait_for_ready(dev, 1200);
+    }
     
     // Check Product Number
     ret = iqs9151_check_product_number(dev);
