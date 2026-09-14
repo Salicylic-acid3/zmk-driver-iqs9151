@@ -657,7 +657,7 @@ struct iqs9151_data {
      * coordinates an unconfigured IQS9151 produces are not this pad's.
      */
     atomic_t recovering;
-    struct k_work recover_work;
+    struct k_work_delayable recover_work;
     uint32_t recover_count;
     int64_t recover_last_ms;
     /*
@@ -5164,7 +5164,8 @@ static struct k_work_q iqs9151_recovery_q;
 static bool iqs9151_recovery_q_started;
 
 static void iqs9151_recover_work_handler(struct k_work *work) {
-    struct iqs9151_data *data = CONTAINER_OF(work, struct iqs9151_data, recover_work);
+    struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+    struct iqs9151_data *data = CONTAINER_OF(dwork, struct iqs9151_data, recover_work);
     const struct device *dev = data->dev;
     int ret;
 
@@ -5229,16 +5230,27 @@ done:
     (void)iqs9151_set_interrupt(dev, true);
 }
 
+/*
+ * Rate-limited by *scheduling* the rebuild for when the interval is up, not
+ * by refusing it. The first version refused, cleared the recovering flag and
+ * stamped the time -- so a pad that reset twice in two seconds was handed
+ * back with its reset flag unacknowledged, every frame after that came
+ * through the reset handler, every one of them refreshed the stamp, and as
+ * long as frames kept coming (a finger on the pad) no rebuild ever ran. The
+ * pad came back only once the finger had been off it for two seconds and
+ * then touched again: "dead for half a minute" on a battery-powered half,
+ * where the radio's connection burst at boot can brown the IC out more than
+ * once.
+ */
 static void iqs9151_request_recovery(struct iqs9151_data *data) {
     const int64_t now = k_uptime_get();
+    int64_t wait_ms = 0;
 
     if (data->recover_count > 0U &&
         (now - data->recover_last_ms) < IQS9151_RECOVERY_MIN_INTERVAL_MS) {
-        LOG_WRN("Trackpad reset again within %dms; not rebuilding this time",
-                IQS9151_RECOVERY_MIN_INTERVAL_MS);
-        data->recover_last_ms = now;
-        atomic_set(&data->recovering, 0);
-        return;
+        wait_ms = IQS9151_RECOVERY_MIN_INTERVAL_MS - (now - data->recover_last_ms);
+        LOG_WRN("Trackpad reset again within %dms; rebuilding in %lldms",
+                IQS9151_RECOVERY_MIN_INTERVAL_MS, wait_ms);
     }
 
     if (!iqs9151_recovery_q_started) {
@@ -5247,7 +5259,9 @@ static void iqs9151_request_recovery(struct iqs9151_data *data) {
         return;
     }
 
-    k_work_submit_to_queue(&iqs9151_recovery_q, &data->recover_work);
+    /* The recovering flag stays set until the rebuild is done: frames until
+     * then describe a pad on its power-on defaults and are ignored. */
+    k_work_schedule_for_queue(&iqs9151_recovery_q, &data->recover_work, K_MSEC(wait_ms));
 }
 
 static int iqs9151_init(const struct device *dev) {
@@ -5361,7 +5375,7 @@ static int iqs9151_init(const struct device *dev) {
         (void)k_thread_name_set(&iqs9151_recovery_q.thread, "iqs9151_recover");
         iqs9151_recovery_q_started = true;
     }
-    k_work_init(&data->recover_work, iqs9151_recover_work_handler);
+    k_work_init_delayable(&data->recover_work, iqs9151_recover_work_handler);
     k_work_init(&data->map_save_work, iqs9151_map_save_work_handler);
 
     // Setup IRQ Call Back
@@ -5423,7 +5437,7 @@ void iqs9151_test_context_init(void *ctx, const struct device *dev) {
 
     memset(data, 0, sizeof(*data));
     data->dev = dev;
-    k_work_init(&data->recover_work, iqs9151_recover_work_handler);
+    k_work_init_delayable(&data->recover_work, iqs9151_recover_work_handler);
     k_work_init(&data->map_save_work, iqs9151_map_save_work_handler);
     k_work_init(&data->work, iqs9151_work_cb);
     k_work_init_delayable(&data->one_finger_click_work, iqs9151_one_finger_click_work_cb);
