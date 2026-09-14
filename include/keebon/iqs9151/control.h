@@ -64,6 +64,14 @@ int iqs9151_request_resolution(uint16_t x_resolution, uint16_t y_resolution);
 int iqs9151_set_cursor_gain(uint16_t x_gain_x10, uint16_t y_gain_x10);
 
 /**
+ * The cursor gain in force on this axis ('x' or 'y'), in tenths. For anything
+ * downstream that receives the pointer's movement and needs the pad's own
+ * counts back -- the two-pad scroll divides it out so that a finger on each
+ * pad scrolls at the same rate as two fingers on one.
+ */
+uint16_t iqs9151_cursor_gain_x10(char axis);
+
+/**
  * Spread each report's pointer movement across this many reports.
  *
  * 1 is immediate. Above that, the accumulator is drained a fraction at a time,

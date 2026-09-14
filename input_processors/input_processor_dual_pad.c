@@ -26,7 +26,10 @@
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #include <zmk/keymap.h>
+#include <keebon/iqs9151/control.h>
 #include <keebon/iqs9151/settings.h>
+#include <zmk/zip_dynamic_scaler.h>
+#include <dt-bindings/zmk/zip_dynamic_scale.h>
 #include <zmk/behavior.h>
 #include <zmk/virtual_key_position.h>
 
@@ -56,6 +59,7 @@ struct dual_pad_config {
     uint16_t zoom_divisor;
     bool invert_scroll;
     bool invert_zoom;
+    bool vertical_is_pad_x; /* the pad axis that arrives as INPUT_REL_Y */
     bool has_zoom_binding;
     struct zmk_behavior_binding zoom_binding;
 };
@@ -216,9 +220,29 @@ static int dual_pad_handle_event(const struct device *dev, struct input_event *e
         } else if (data->mode == DUAL_PAD_MODE_SCROLL) {
             const bool vertical = dual_pad_abs(common_y) >= dual_pad_abs(common_x);
             const int32_t along = vertical ? common_y : common_x;
-            const int32_t out = along / (int32_t)cfg->scroll_divisor;
+            /*
+             * What arrives is pointer movement: the pad's counts times the
+             * cursor gain (2.4 on this pad's long axis) times the dynamic
+             * pointer scale. Two fingers on one pad scroll from the pad's
+             * counts through the scroll chain, with its own dynamic scale.
+             * Put this on the same footing -- divide the pointer factors out,
+             * apply the scroll one -- so the divisor means the same counts
+             * per notch on both routes and the two scrolls run at one rate.
+             */
+            const char pad_axis = (vertical == cfg->vertical_is_pad_x) ? 'x' : 'y';
+            const int64_t gain_x10 = MAX(1, (int64_t)iqs9151_cursor_gain_x10(pad_axis));
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_DYNAMIC_SCALER)
+            const int64_t xy_x10 = MAX(1, (int64_t)zmk_zip_dynamic_scaler_get_scale_x10(ZDS_XY));
+            const int64_t sc_x10 = MAX(1, (int64_t)zmk_zip_dynamic_scaler_get_scale_x10(ZDS_SC));
+#else
+            const int64_t xy_x10 = 10, sc_x10 = 10;
+#endif
+            const int64_t per_notch = (int64_t)cfg->scroll_divisor * gain_x10 * xy_x10;
+            const int32_t out = (int32_t)(((int64_t)along * 10 * sc_x10) / per_notch);
             if (out != 0) {
-                const int32_t consumed = out * (int32_t)cfg->scroll_divisor;
+                /* What those notches were worth in the arriving units; the
+                 * rounding left over stays in the accumulators. */
+                const int32_t consumed = (int32_t)(((int64_t)out * per_notch) / (10 * sc_x10));
                 if (vertical) {
                     data->acc_y[0] -= consumed;
                     data->acc_y[1] -= consumed;
@@ -277,6 +301,7 @@ static int dual_pad_init(const struct device *dev) { return 0; }
         .zoom_divisor = DT_INST_PROP_OR(n, zoom_divisor, 24),                                      \
         .invert_scroll = DT_INST_PROP(n, invert_scroll),                                           \
         .invert_zoom = DT_INST_PROP(n, invert_zoom),                                               \
+        .vertical_is_pad_x = DT_INST_ENUM_IDX_OR(n, vertical_pad_axis, 0) == 0,                    \
         .has_zoom_binding = DT_INST_NODE_HAS_PROP(n, bindings),                                    \
         .zoom_binding = DUAL_PAD_ZOOM_BINDING(n),                                                  \
     };                                                                                             \

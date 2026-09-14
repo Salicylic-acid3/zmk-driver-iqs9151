@@ -31,7 +31,23 @@ properties:
   scroll-divisor:
     type: int
     default: 16
-    description: Device counts per unit of scroll output.
+    description: |
+      Device counts per unit of scroll output. The pad's own counts: the
+      pointer movement this processor receives has been through the cursor
+      gain and the dynamic pointer scale, and both are divided out again (and
+      the dynamic scroll scale applied) before this divisor, so that a finger
+      on each pad scrolls at the same rate as two fingers on one pad going
+      through the ordinary scroll chain with the same divisor.
+
+  vertical-pad-axis:
+    type: string
+    default: "x"
+    enum: ["x", "y"]
+    description: |
+      Which axis of the pad arrives here as vertical (INPUT_REL_Y) movement,
+      so the right cursor gain is divided out: "x" when the listener swaps the
+      axes before this processor (the pad's long axis is the screen's
+      vertical), "y" when it does not.
 
   zoom-divisor:
     type: int

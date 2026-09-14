@@ -3098,6 +3098,11 @@ int iqs9151_set_cursor_smoothing(uint16_t reports) {
     return 0;
 }
 
+uint16_t iqs9151_cursor_gain_x10(char axis) {
+    return (uint16_t)atomic_get((axis == 'y') ? &iqs9151_cursor_gain_y_x10
+                                              : &iqs9151_cursor_gain_x_x10);
+}
+
 int iqs9151_set_cursor_gain(uint16_t x_gain_x10, uint16_t y_gain_x10) {
     if (x_gain_x10 == 0U || y_gain_x10 == 0U) {
         return -EINVAL;
