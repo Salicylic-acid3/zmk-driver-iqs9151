@@ -4539,8 +4539,15 @@ static void iqs9151_work_cb(struct k_work *work) {
      * ignored until the configuration is back, because until then they describe
      * a differently-shaped pad.
      */
+    /*
+     * Not re-armed here. RDY is a level interrupt and stays asserted until the
+     * window the device opened is serviced; re-arming without reading is an
+     * interrupt that fires again the moment it is enabled, a work item per
+     * firing, and a system work queue that does nothing else until the
+     * rebuild happens to close the window -- which it cannot, starved of the
+     * CPU. The rebuild re-arms it when it is done (see the recovery handler).
+     */
     if (atomic_get(&data->recovering) != 0) {
-        (void)iqs9151_set_interrupt(dev, true);
         return;
     }
 
@@ -4568,7 +4575,10 @@ static void iqs9151_work_cb(struct k_work *work) {
 
     iqs9151_process_frame(data, &frame, now_ms);
 
-    (void)iqs9151_set_interrupt(dev, true);
+    /* A frame that asked for a rebuild leaves the interrupt to the rebuild. */
+    if (atomic_get(&data->recovering) == 0) {
+        (void)iqs9151_set_interrupt(dev, true);
+    }
 }
 
 static void iqs9151_gpio_cb(const struct device *port, struct gpio_callback *cb, uint32_t pins) {
