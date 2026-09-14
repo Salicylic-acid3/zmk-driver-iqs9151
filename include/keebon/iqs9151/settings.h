@@ -105,6 +105,11 @@
  * iqs9151_set_ripple_map in control.h. */
 #define IQS9151_SETTING_RIPPLE_MAP_KEY "ripple_map"
 
+/* How many of the map's 256 bins per axis have learned enough to correct.
+ * Written by the driver, for the app; it changes nothing to write it. */
+#define IQS9151_SETTING_RIPPLE_MAP_LEARNED_X_KEY "ripple_map_learned_x"
+#define IQS9151_SETTING_RIPPLE_MAP_LEARNED_Y_KEY "ripple_map_learned_y"
+
 /* What the search found, per axis, in tenths of a count; 0 is nothing yet.
  * Written by the driver, for the app to show -- the one way to tell, without
  * a debug build, whether a pad has locked on to its wave or is still looking.
@@ -144,6 +149,9 @@ bool iqs9151_setting_pinch_invert(void);
  * nothing, or forgotten). Published as the ripple_found_* settings above. */
 void iqs9151_setting_ripple_found(char axis, uint16_t period_x10);
 
+/* The driver reporting how many bins of the position map can correct. */
+void iqs9151_setting_map_learned(char axis, uint16_t bins);
+
 #else
 
 static inline bool iqs9151_setting_one_hand_pinch(void) {
@@ -157,6 +165,11 @@ static inline bool iqs9151_setting_pinch_invert(void) {
 static inline void iqs9151_setting_ripple_found(char axis, uint16_t period_x10) {
     ARG_UNUSED(axis);
     ARG_UNUSED(period_x10);
+}
+
+static inline void iqs9151_setting_map_learned(char axis, uint16_t bins) {
+    ARG_UNUSED(axis);
+    ARG_UNUSED(bins);
 }
 
 #endif /* CONFIG_INPUT_IQS9151_RUNTIME_SETTINGS */

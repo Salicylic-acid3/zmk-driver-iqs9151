@@ -550,10 +550,11 @@ struct iqs9151_ripple_eq {
  */
 #define IQS9151_MAP_BINS 256
 #define IQS9151_MAP_ONE 4096             /* Q12: 1.0 */
-#define IQS9151_MAP_MU_SHIFT 5           /* per-bin average: 1/32 */
-#define IQS9151_MAP_MIN_SAMPLES 8        /* a bin corrects only after this many */
+#define IQS9151_MAP_MEAN_CAP 32          /* per-bin: a true mean this far, then a 1/32 average */
+#define IQS9151_MAP_MIN_SAMPLES 6        /* a bin corrects only after this many */
 #define IQS9151_MAP_REBUILD_EVERY 64     /* learning steps between table rebuilds */
-#define IQS9151_MAP_SAVE_MIN_MS 30000    /* flash writes at most this often */
+#define IQS9151_MAP_SAVE_MIN_MS 600000   /* flash writes at most every ten minutes ... */
+#define IQS9151_MAP_SAVE_MIN_STEPS 256   /* ... and only after this much new learning */
 #define IQS9151_MAP_TRACE_EVERY 512      /* devtool: learning steps per dump */
 #define IQS9151_MAP_CORR_MIN 64          /* Q8: never more than /4 ... */
 #define IQS9151_MAP_CORR_MAX 1024        /* ... or x4 */
@@ -570,7 +571,9 @@ struct iqs9151_ripple_map {
     uint16_t tick;                   /* learning steps since the last rebuild */
     uint16_t updates;                /* learning steps since the last trace */
     bool dirty;                      /* learned something since the last save */
+    uint32_t steps_since_save;
     int64_t saved_ms;
+    uint16_t learned;                /* bins with enough samples, as last published */
 };
 
 struct iqs9151_data {
@@ -667,6 +670,7 @@ struct iqs9151_data {
     struct iqs9151_ripple_eq ripple_y;
     struct iqs9151_ripple_map map_x;
     struct iqs9151_ripple_map map_y;
+    struct k_work map_save_work;     /* flash, off the system work queue */
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_MOTION_TRACE)
     int64_t trace_last_read_ms;
     uint16_t trace_quiet;
@@ -3727,6 +3731,8 @@ static uint16_t iqs9151_ripple_scan_verdict(struct iqs9151_ripple_scan *scan, ch
  */
 /* ---- The position map ---- */
 
+static struct k_work_q iqs9151_recovery_q; /* defined with the recovery below */
+
 /*
  * What was learned last time, kept across power cycles: the table in Q6
  * (64 = 1.0) behind the resolution it was learned at, under
@@ -3767,6 +3773,7 @@ SETTINGS_STATIC_HANDLER_DEFINE(iqs9151_map, "iqs9151/map", NULL, iqs9151_map_set
 #endif
 
 static void iqs9151_map_rebuild(struct iqs9151_ripple_map *map);
+static void iqs9151_map_publish(struct iqs9151_ripple_map *map, char axis);
 
 static void iqs9151_map_clear(struct iqs9151_ripple_map *map, uint16_t resolution) {
     memset(map->g, 0, sizeof(map->g));
@@ -3780,6 +3787,7 @@ static void iqs9151_map_clear(struct iqs9151_ripple_map *map, uint16_t resolutio
     map->rem_fp = 0;
     map->tick = 0;
     map->dirty = false;
+    map->steps_since_save = 0;
 }
 
 /* Start from what was saved, if it was learned at this resolution. */
@@ -3800,11 +3808,22 @@ static void iqs9151_map_restore(struct iqs9151_ripple_map *map, char axis, uint1
     }
     iqs9151_map_rebuild(map);
     LOG_INF("ripple map %c: %u of %u bins restored", axis, restored, IQS9151_MAP_BINS);
+    iqs9151_map_publish(map, axis);
 }
 
-static void iqs9151_map_save(struct iqs9151_ripple_map *map, char axis, int64_t now_ms) {
-    if (!map->dirty || (now_ms - map->saved_ms) < IQS9151_MAP_SAVE_MIN_MS) {
-        return;
+/*
+ * Snapshot the table for saving. Returns true when there is something new
+ * enough and old enough to be worth a flash write. The write itself does
+ * not happen here: this runs in the frame work on the system work queue,
+ * and a flash write on this SoC waits for gaps between radio events -- tens
+ * of milliseconds during which everything else queued there, the key
+ * matrix scan included, stands still. The first build wrote from here every
+ * thirty seconds, and typed keys arrived late and doubled.
+ */
+static bool iqs9151_map_snapshot(struct iqs9151_ripple_map *map, char axis, int64_t now_ms) {
+    if (!map->dirty || map->steps_since_save < IQS9151_MAP_SAVE_MIN_STEPS ||
+        (now_ms - map->saved_ms) < IQS9151_MAP_SAVE_MIN_MS) {
+        return false;
     }
     const int i = (axis == 'y') ? 1 : 0;
     struct iqs9151_map_record *rec = &iqs9151_map_saved[i];
@@ -3817,14 +3836,38 @@ static void iqs9151_map_save(struct iqs9151_ripple_map *map, char axis, int64_t 
     }
     iqs9151_map_saved_valid[i] = true;
     map->dirty = false;
+    map->steps_since_save = 0;
     map->saved_ms = now_ms;
+    return true;
+}
+
+static void iqs9151_map_save_work_handler(struct k_work *work) {
+    struct iqs9151_data *data = CONTAINER_OF(work, struct iqs9151_data, map_save_work);
+    ARG_UNUSED(data);
 #if IS_ENABLED(CONFIG_SETTINGS)
-    const int ret = settings_save_one((axis == 'y') ? "iqs9151/map/y" : "iqs9151/map/x", rec,
-                                      sizeof(*rec));
-    if (ret != 0) {
-        LOG_WRN("ripple map %c: could not save (%d)", axis, ret);
+    for (int i = 0; i < 2; i++) {
+        if (!iqs9151_map_saved_valid[i]) {
+            continue;
+        }
+        const int ret = settings_save_one(i ? "iqs9151/map/y" : "iqs9151/map/x",
+                                          &iqs9151_map_saved[i], sizeof(iqs9151_map_saved[i]));
+        if (ret != 0) {
+            LOG_WRN("ripple map %c: could not save (%d)", i ? 'y' : 'x', ret);
+        }
     }
 #endif
+}
+
+/* How many bins can correct, for the app: written only when it changes. */
+static void iqs9151_map_publish(struct iqs9151_ripple_map *map, char axis) {
+    uint16_t learned = 0;
+    for (size_t b = 0; b < IQS9151_MAP_BINS; b++) {
+        learned += (map->n[b] >= IQS9151_MAP_MIN_SAMPLES) ? 1U : 0U;
+    }
+    if (learned != map->learned) {
+        map->learned = learned;
+        iqs9151_setting_map_learned(axis, learned);
+    }
 }
 
 /*
@@ -3887,11 +3930,15 @@ static uint32_t iqs9151_map_corr_at(const struct iqs9151_ripple_map *map, uint32
     return ((256U - w) * map->corr[b] + w * map->corr[other] + 128U) >> 8;
 }
 
-static void iqs9151_map_lift(struct iqs9151_ripple_map *map, char axis, int64_t now_ms) {
+/* Returns true when a snapshot was taken and wants writing. */
+static bool iqs9151_map_lift(struct iqs9151_ripple_map *map, char axis, int64_t now_ms) {
     memset(&map->ref, 0, sizeof(map->ref));
     map->have_prev = false;
     map->rem_fp = 0;
-    iqs9151_map_save(map, axis, now_ms);
+    if (map->dirty) {
+        iqs9151_map_publish(map, axis);
+    }
+    return iqs9151_map_snapshot(map, axis, now_ms);
 }
 
 static int16_t iqs9151_map_apply(struct iqs9151_ripple_map *map, char axis, uint16_t abs_pos,
@@ -3929,15 +3976,21 @@ static int16_t iqs9151_map_apply(struct iqs9151_ripple_map *map, char axis, uint
                               ((int64_t)map->ref.dist * spans);
         const int32_t sample = (int32_t)MIN(ratio, 4 * IQS9151_MAP_ONE);
 
+        /* A true running mean for the first samples, an exponential one
+         * after: a bin at ordinary stroke speed sees one or two samples a
+         * pass, and a 1/32 average that started from a single quantised
+         * frame would still be that frame twenty passes later. */
         if (map->n[bin] == 0U) {
             map->g[bin] = (int16_t)sample;
         } else {
-            map->g[bin] = (int16_t)(map->g[bin] + ((sample - map->g[bin]) >> IQS9151_MAP_MU_SHIFT));
+            const int32_t weight = MIN((int32_t)map->n[bin] + 1, IQS9151_MAP_MEAN_CAP);
+            map->g[bin] = (int16_t)(map->g[bin] + (sample - map->g[bin]) / weight);
         }
         if (map->n[bin] < UINT8_MAX) {
             map->n[bin]++;
         }
         map->dirty = true;
+        map->steps_since_save++;
 
         if (++map->tick >= IQS9151_MAP_REBUILD_EVERY) {
             map->tick = 0;
@@ -4109,8 +4162,11 @@ static void iqs9151_apply_cursor_gain(struct iqs9151_data *data, struct iqs9151_
         /* The equalisers keep what they learned; only the stroke state goes. */
         iqs9151_ripple_lift(&data->ripple_x);
         iqs9151_ripple_lift(&data->ripple_y);
-        iqs9151_map_lift(&data->map_x, 'x', now_ms);
-        iqs9151_map_lift(&data->map_y, 'y', now_ms);
+        const bool save_x = iqs9151_map_lift(&data->map_x, 'x', now_ms);
+        const bool save_y = iqs9151_map_lift(&data->map_y, 'y', now_ms);
+        if (save_x || save_y) {
+            k_work_submit_to_queue(&iqs9151_recovery_q, &data->map_save_work);
+        }
         return;
     }
 
@@ -4989,6 +5045,7 @@ static int iqs9151_init(const struct device *dev) {
         iqs9151_recovery_q_started = true;
     }
     k_work_init(&data->recover_work, iqs9151_recover_work_handler);
+    k_work_init(&data->map_save_work, iqs9151_map_save_work_handler);
 
     // Setup IRQ Call Back
     k_work_init(&data->work, iqs9151_work_cb);
@@ -5050,6 +5107,7 @@ void iqs9151_test_context_init(void *ctx, const struct device *dev) {
     memset(data, 0, sizeof(*data));
     data->dev = dev;
     k_work_init(&data->recover_work, iqs9151_recover_work_handler);
+    k_work_init(&data->map_save_work, iqs9151_map_save_work_handler);
     k_work_init(&data->work, iqs9151_work_cb);
     k_work_init_delayable(&data->one_finger_click_work, iqs9151_one_finger_click_work_cb);
     k_work_init_delayable(&data->two_finger_click_work, iqs9151_two_finger_click_work_cb);

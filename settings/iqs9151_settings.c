@@ -195,6 +195,28 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
     ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
     ZMK_CUSTOM_SETTING_RANGE_INT32(0, 1600));
 
+/* In RAM only: it is a progress figure, rewritten at every lift, and a
+ * flash write for each would be the stall the map's own save avoids. */
+ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
+    iqs9151_ripple_map_learned_x, IQS9151_SETTINGS_SUBSYSTEM_ID,
+    IQS9151_SETTING_RIPPLE_MAP_LEARNED_X_KEY, ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+    ZMK_CUSTOM_SETTING_VALUE_INT32(0), ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
+    ZMK_CUSTOM_SETTING_RANGE_INT32(0, 256));
+
+ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
+    iqs9151_ripple_map_learned_y, IQS9151_SETTINGS_SUBSYSTEM_ID,
+    IQS9151_SETTING_RIPPLE_MAP_LEARNED_Y_KEY, ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+    ZMK_CUSTOM_SETTING_VALUE_INT32(0), ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
+    ZMK_CUSTOM_SETTING_RANGE_INT32(0, 256));
+
+void iqs9151_setting_map_learned(char axis, uint16_t bins) {
+    const struct zmk_custom_setting *setting =
+        (axis == 'y') ? &iqs9151_ripple_map_learned_y : &iqs9151_ripple_map_learned_x;
+    (void)zmk_custom_setting_set_int32(setting, bins, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+}
+
 void iqs9151_setting_ripple_found(char axis, uint16_t period_x10) {
     const struct zmk_custom_setting *setting =
         (axis == 'y') ? &iqs9151_ripple_found_y : &iqs9151_ripple_found_x;
