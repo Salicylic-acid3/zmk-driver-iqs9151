@@ -3748,7 +3748,13 @@ static struct k_work_q iqs9151_recovery_q; /* defined with the recovery below */
  * iqs9151/map/<axis>. Loaded by the settings handler before the device
  * knows about it, so it waits here until the map is first used.
  */
+/* What is saved. The layout number is part of the record's size, so a table
+ * learned by a driver that learned differently (before the speed gate below,
+ * say) is not restored: the size check in the settings handler refuses it. */
+#define IQS9151_MAP_RECORD_LAYOUT 2
+
 struct iqs9151_map_record {
+    uint8_t layout[IQS9151_MAP_RECORD_LAYOUT];
     uint16_t resolution;
     uint8_t g[IQS9151_MAP_BINS];
 } __packed;
@@ -3842,6 +3848,7 @@ static bool iqs9151_map_snapshot(struct iqs9151_ripple_map *map, char axis, int6
     }
     const int i = (axis == 'y') ? 1 : 0;
     struct iqs9151_map_record *rec = &iqs9151_map_saved[i];
+    memset(rec->layout, IQS9151_MAP_RECORD_LAYOUT, sizeof(rec->layout));
     rec->resolution = map->resolution;
     for (size_t b = 0; b < IQS9151_MAP_BINS; b++) {
         rec->g[b] = (map->n[b] >= IQS9151_MAP_MIN_SAMPLES)
@@ -4140,7 +4147,20 @@ static int16_t iqs9151_map_apply(struct iqs9151_ripple_map *map, char axis, uint
         MAX(8, (int32_t)((map->period_x10 != 0U) ? map->period_x10 : map->period_geo_x10) / 10);
     const uint32_t spans = iqs9151_ripple_ref_push(&map->ref, value, period);
 
-    if (had_prev && spans > 0U && (int32_t)map->ref.dist >= period) {
+    /*
+     * Learn only from movement fast enough to be measured: at least two
+     * counts a frame on average over the window. Below that the pad's
+     * whole-count output is mostly quantisation -- a finger drifting a
+     * third of a count a frame reports 0, 0, 1, 0, 0, 1 -- and a ratio of
+     * one such report to the window's mean is noise of half its size.
+     * That noise was what the horizontal table learned from vertical
+     * strokes (whose horizontal component is exactly that drift): a
+     * random slope per bin, felt as a wave that was never there. The
+     * correction still applies at every speed; the wave is positional.
+     */
+    const bool measurable = map->ref.dist >= 2U * map->ref.frames;
+
+    if (had_prev && spans > 0U && measurable && (int32_t)map->ref.dist >= period) {
         const int32_t mag = MIN(255, (value < 0) ? -(int32_t)value : (int32_t)value);
         /* sample = (mag/spans) / (dist/frames), Q12, capped at 4.0. */
         const int64_t ratio = ((int64_t)mag * map->ref.frames * IQS9151_MAP_ONE) /
