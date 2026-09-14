@@ -259,10 +259,17 @@ config INPUT_IQS9151_RIPPLE_PERIOD_Y_X10
 
 config INPUT_IQS9151_RECOVERY_STACK_SIZE
     int "IQS9151 reset-recovery thread stack size"
-    default 1536
+    default 3072
     help
       Stack for the thread that rewrites the device's configuration after the
-      device reports it has reset itself (SHOW_RESET).
+      device reports it has reset itself (SHOW_RESET), and that writes the
+      ripple map to flash (INPUT_IQS9151_RIPPLE_MAP).
+
+      3072 rather than the 1536 the rebuild alone needed: the map's
+      settings_save_one goes through the settings and NVS layers and the
+      flash driver's radio synchronisation, and at 1536 the wireless half
+      of the first keyboard fell over ten minutes into use -- the first
+      save -- and came back as a fresh reboot.
 
       It exists so that rebuild does not run on the system work queue. The
       rebuild is the same sequence init performs -- acknowledge the reset,
