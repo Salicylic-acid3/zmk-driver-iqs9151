@@ -579,6 +579,9 @@ struct iqs9151_ripple_map {
     uint32_t steps_since_save;
     int64_t saved_ms;
     uint16_t learned;                /* bins with enough samples, as last published */
+    uint16_t period_geo_x10;  /* the wave's period from the geometry, the window until measured */
+    uint16_t period_x10;      /* the wave's period as measured from the table; 0 = not yet */
+    uint16_t period_told_x10; /* ... as last published to the app */
 };
 
 struct iqs9151_data {
@@ -3798,12 +3801,14 @@ static void iqs9151_map_clear(struct iqs9151_ripple_map *map, uint16_t resolutio
     map->tick = 0;
     map->dirty = false;
     map->steps_since_save = 0;
+    map->period_x10 = 0;
 }
 
 /* Start from what was saved, if it was learned at this resolution. */
 static void iqs9151_map_restore(struct iqs9151_ripple_map *map, char axis, uint16_t resolution) {
     const int i = (axis == 'y') ? 1 : 0;
     iqs9151_map_clear(map, resolution);
+    map->period_geo_x10 = iqs9151_ripple_expected_x10(axis, resolution);
     if (!iqs9151_map_saved_valid[i] || iqs9151_map_saved[i].resolution != resolution) {
         return;
     }
@@ -3888,6 +3893,118 @@ static void iqs9151_map_publish(struct iqs9151_ripple_map *map, char axis) {
  * kernel takes a third of that harmonic away again (measured: the residual
  * doubles). The per-bin average does the smoothing, over samples.
  */
+/*
+ * The wave's period, read off the table itself.
+ *
+ * The reference the ratios are taken against is a trailing window one
+ * period long, so that the wave averages out of it. The window was sized
+ * from the geometry -- half an electrode pitch -- and on this pad that is
+ * wrong by a third along the long axis: the geometry says 76 counts, the
+ * table (and the waveform tool before it) says 100. A window that is not a
+ * whole number of periods leaves part of the wave in the reference, and
+ * what the table learns is the wave divided by a shifted copy of itself:
+ * the right period, the wrong depth.
+ *
+ * So once enough of the table is filled, measure the period from it: the
+ * lag at which the learned slope best matches itself, over the lags a
+ * period could plausibly be (half to twice the geometric one), refined to
+ * a fraction of a bin by the parabola through the three points around the
+ * peak. Bins that have not learned are left out of every pair. The
+ * distortion from a wrong window does not move the period, only the
+ * shape, so this converges: the next window is right, the next table is
+ * true.
+ */
+#define IQS9151_MAP_LAG_SLOTS 68 /* lags tried, plus one either side for the parabola */
+
+static void iqs9151_map_measure_period(struct iqs9151_ripple_map *map) {
+    const uint32_t res = MAX(1U, (uint32_t)map->resolution);
+    /* The geometric period in bins, x10: period_x10 / res * 256 / 10. */
+    const uint32_t geo_bins_x10 =
+        ((uint32_t)map->period_geo_x10 * IQS9151_MAP_BINS + res / 2U) / res;
+    const int lag_min = MAX(3, (int)(geo_bins_x10 / 20U)); /* half */
+    const int lag_max =
+        MIN(lag_min + IQS9151_MAP_LAG_SLOTS - 3, (int)(geo_bins_x10 / 5U)); /* twice */
+    if (lag_max <= lag_min + 2) {
+        return;
+    }
+
+    /* The match at lag zero, per bin: what a perfect match would score. */
+    int64_t r0 = 0;
+    uint32_t n0 = 0;
+    for (size_t b = 0; b < IQS9151_MAP_BINS; b++) {
+        if (map->n[b] >= IQS9151_MAP_MIN_SAMPLES) {
+            const int32_t d = (int32_t)map->corr[b] - 256;
+            r0 += (int64_t)d * d;
+            n0++;
+        }
+    }
+    if (n0 < 24U || r0 == 0) {
+        return;
+    }
+    r0 /= n0;
+
+    /* The match at every lag from one below the range to one above, per
+     * pair of learned bins. INT32_MIN marks a lag with too few pairs. */
+    int32_t r[IQS9151_MAP_LAG_SLOTS];
+    const int first = lag_min - 1;
+    for (int lag = first; lag <= lag_max + 1; lag++) {
+        int64_t acc = 0;
+        uint32_t pairs = 0;
+        for (size_t b = 0; b + (size_t)lag < IQS9151_MAP_BINS; b++) {
+            if (map->n[b] >= IQS9151_MAP_MIN_SAMPLES &&
+                map->n[b + (size_t)lag] >= IQS9151_MAP_MIN_SAMPLES) {
+                acc += (int64_t)((int32_t)map->corr[b] - 256) *
+                       ((int32_t)map->corr[b + (size_t)lag] - 256);
+                pairs++;
+            }
+        }
+        r[lag - first] = (pairs >= 16U) ? (int32_t)(acc / (int64_t)pairs) : INT32_MIN;
+    }
+
+    int best = -1;
+    int32_t best_r = 0;
+    for (int lag = lag_min; lag <= lag_max; lag++) {
+        const int32_t v = r[lag - first];
+        if (v != INT32_MIN && v > best_r) {
+            best_r = v;
+            best = lag;
+        }
+    }
+    /* A real wave: the match at its period is at least a third of the match
+     * at lag zero (a clean sine would give all of it; noise gives nothing). */
+    if (best < 0 || (int64_t)best_r * 3 < r0) {
+        return;
+    }
+
+    /* Parabolic refinement through the three points around the peak, in
+     * sixteenths of a bin, when both neighbours were measured. */
+    int32_t lag_x16 = best * 16;
+    const int32_t rl = r[best - first - 1];
+    const int32_t rr = r[best - first + 1];
+    if (rl != INT32_MIN && rr != INT32_MIN) {
+        const int64_t denom = (int64_t)rl - 2 * (int64_t)best_r + (int64_t)rr;
+        if (denom < 0) {
+            lag_x16 += (int32_t)((((int64_t)rl - (int64_t)rr) * 16) / (2 * denom));
+        }
+    }
+    /* Bins to tenths of counts: lag * res / 256. */
+    const uint32_t period_x10 =
+        ((uint32_t)lag_x16 * res * 10U + 8U * IQS9151_MAP_BINS) / (16U * IQS9151_MAP_BINS);
+    const uint16_t measured =
+        (uint16_t)CLAMP(period_x10, IQS9151_RIPPLE_MIN_PERIOD_X10, IQS9151_RIPPLE_MAX_PERIOD_X10);
+    const int32_t moved = (int32_t)measured - (int32_t)map->period_x10;
+    map->period_x10 = measured;
+    /* A new window means what was learned so far was against a reference
+     * with some of the wave still in it. Keep it -- it has the right period
+     * -- but let the samples taken against the right reference outweigh it
+     * soon, rather than one thirty-second at a time. */
+    if (moved >= 20 || moved <= -20) {
+        for (size_t b = 0; b < IQS9151_MAP_BINS; b++) {
+            map->n[b] = MIN(map->n[b], 8U);
+        }
+    }
+}
+
 static void iqs9151_map_rebuild(struct iqs9151_ripple_map *map) {
     /*
      * The slope is 1/g, normalised so that its mean over the bins -- which
@@ -3936,6 +4053,7 @@ static void iqs9151_map_rebuild(struct iqs9151_ripple_map *map) {
     if (map->have_prev) {
         map->prev_l = (int32_t)iqs9151_map_l(map, map->prev_abs);
     }
+    iqs9151_map_measure_period(map);
 }
 
 static uint32_t iqs9151_map_bin(const struct iqs9151_ripple_map *map, uint32_t pos) {
@@ -3973,6 +4091,19 @@ static bool iqs9151_map_lift(struct iqs9151_ripple_map *map, char axis, int64_t 
     if (map->dirty) {
         iqs9151_map_publish(map, axis);
     }
+    /* The measured period goes where the period search puts its answer,
+     * so the app shows it; that is a flash write, so only when it has
+     * moved by a couple of counts. */
+    if (map->period_x10 != 0U) {
+        const int32_t moved = (int32_t)map->period_x10 - (int32_t)map->period_told_x10;
+        if (moved >= 20 || moved <= -20) {
+            map->period_told_x10 = map->period_x10;
+            iqs9151_ripple_remember(axis, map->period_x10);
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_MOTION_TRACE)
+            LOG_WRN("m%c period %u.%u", axis, map->period_x10 / 10U, map->period_x10 % 10U);
+#endif
+        }
+    }
     return iqs9151_map_snapshot(map, axis, now_ms);
 }
 
@@ -3999,12 +4130,14 @@ static int16_t iqs9151_map_apply(struct iqs9151_ripple_map *map, char axis, uint
     map->have_prev = true;
     const uint32_t bin = iqs9151_map_bin(map, mid);
 
-    /* The reference: the local mean over one period of the wave (half an
-     * electrode pitch, from the geometry), so the ratio is to what the
-     * finger really did with the wave averaged out. The window holds a
-     * limited number of reports, so it must not be longer than a slow
-     * stroke can fill. */
-    const int32_t period = MAX(8, (int32_t)iqs9151_ripple_expected_x10(axis, resolution) / 10);
+    /* The reference: the local mean over one period of the wave -- from
+     * the geometry until the table has learned enough to measure it, then
+     * from the table (see iqs9151_map_measure_period) -- so the ratio is to
+     * what the finger really did with the wave averaged out. The window
+     * holds a limited number of reports, so it must not be longer than a
+     * slow stroke can fill. */
+    const int32_t period =
+        MAX(8, (int32_t)((map->period_x10 != 0U) ? map->period_x10 : map->period_geo_x10) / 10);
     const uint32_t spans = iqs9151_ripple_ref_push(&map->ref, value, period);
 
     if (had_prev && spans > 0U && (int32_t)map->ref.dist >= period) {
