@@ -25,6 +25,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -526,6 +527,52 @@ struct iqs9151_ripple_eq {
     bool scanning;                           /* the search is on for this axis */
 };
 
+/*
+ * The ripple as a map over absolute position, no period required.
+ *
+ * The equaliser above needs the period of the wave, and the period search
+ * needs the wave to be a clean function of (position mod period) -- which,
+ * on the third pad measured, it evidently is not well enough for the search
+ * to lock, while the wave itself is plainly there, fixed to the pad, at
+ * +/-50% of the speed. So instead of a shape indexed by phase, a table
+ * indexed by where on the axis the finger is: 256 bins across the
+ * resolution (eight counts, a third of a millimetre, on the long axis),
+ * each holding the average of "this frame's movement over the local mean
+ * movement" seen there. Whatever shape the nonlinearity has -- electrode
+ * pitch, edges, an uneven electrode, a place where the overlay is thicker
+ * -- it is in the table after a few strokes along the axis, and divided out
+ * of every report from then on.
+ *
+ * The cost is convergence: 256 numbers learn slower than eight, and each
+ * bin only learns when the finger passes through it. Three or four
+ * full-length strokes cover an axis; the table is kept across power cycles
+ * so that is once per pad, not once per morning.
+ */
+#define IQS9151_MAP_BINS 256
+#define IQS9151_MAP_ONE 4096             /* Q12: 1.0 */
+#define IQS9151_MAP_MU_SHIFT 5           /* per-bin average: 1/32 */
+#define IQS9151_MAP_MIN_SAMPLES 8        /* a bin corrects only after this many */
+#define IQS9151_MAP_REBUILD_EVERY 64     /* learning steps between table rebuilds */
+#define IQS9151_MAP_SAVE_MIN_MS 30000    /* flash writes at most this often */
+#define IQS9151_MAP_TRACE_EVERY 512      /* devtool: learning steps per dump */
+#define IQS9151_MAP_CORR_MIN 64          /* Q8: never more than /4 ... */
+#define IQS9151_MAP_CORR_MAX 1024        /* ... or x4 */
+
+struct iqs9151_ripple_map {
+    int16_t g[IQS9151_MAP_BINS];     /* learned speed ratio, Q12; 0 = never visited */
+    uint8_t n[IQS9151_MAP_BINS];     /* samples seen, saturating */
+    uint16_t corr[IQS9151_MAP_BINS]; /* Q8 correction: mean(g) / g, smoothed; 256 = none */
+    struct iqs9151_ripple_ref ref;   /* local reference: one electrode pitch of travel */
+    uint16_t resolution;             /* the axis resolution the table is for */
+    uint16_t prev_abs;               /* where the finger was last frame */
+    bool have_prev;
+    int32_t rem_fp;                  /* output carry, 1/256 count */
+    uint16_t tick;                   /* learning steps since the last rebuild */
+    uint16_t updates;                /* learning steps since the last trace */
+    bool dirty;                      /* learned something since the last save */
+    int64_t saved_ms;
+};
+
 struct iqs9151_data {
     const struct device *dev;
     struct gpio_callback gpio_cb;
@@ -618,6 +665,8 @@ struct iqs9151_data {
     /* Positional ripple equalisers, one per axis. See struct iqs9151_ripple_eq. */
     struct iqs9151_ripple_eq ripple_x;
     struct iqs9151_ripple_eq ripple_y;
+    struct iqs9151_ripple_map map_x;
+    struct iqs9151_ripple_map map_y;
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_MOTION_TRACE)
     int64_t trace_last_read_ms;
     uint16_t trace_quiet;
@@ -3219,6 +3268,13 @@ int iqs9151_set_ripple_auto(bool enabled) {
     return 0;
 }
 
+static atomic_t iqs9151_ripple_map_on = ATOMIC_INIT(IS_ENABLED(CONFIG_INPUT_IQS9151_RIPPLE_MAP));
+
+int iqs9151_set_ripple_map(bool enabled) {
+    atomic_set(&iqs9151_ripple_map_on, enabled ? 1 : 0);
+    return 0;
+}
+
 static void iqs9151_ripple_scan_start(struct iqs9151_ripple_scan *scan, uint8_t stage,
                                       uint16_t base_x10, uint16_t step_x10, uint8_t count) {
     memset(scan->a, 0, sizeof(scan->a));
@@ -3669,6 +3725,253 @@ static uint16_t iqs9151_ripple_scan_verdict(struct iqs9151_ripple_scan *scan, ch
  * Learning and the search run whenever either is non-zero or the search is
  * on.
  */
+/* ---- The position map ---- */
+
+/*
+ * What was learned last time, kept across power cycles: the table in Q6
+ * (64 = 1.0) behind the resolution it was learned at, under
+ * iqs9151/map/<axis>. Loaded by the settings handler before the device
+ * knows about it, so it waits here until the map is first used.
+ */
+struct iqs9151_map_record {
+    uint16_t resolution;
+    uint8_t g[IQS9151_MAP_BINS];
+} __packed;
+
+static struct iqs9151_map_record iqs9151_map_saved[2];
+static bool iqs9151_map_saved_valid[2];
+
+#if IS_ENABLED(CONFIG_SETTINGS)
+static int iqs9151_map_settings_set(const char *name, size_t len, settings_read_cb read_cb,
+                                    void *cb_arg) {
+    const char *next;
+    int axis = -1;
+    if (settings_name_steq(name, "x", &next) && next == NULL) {
+        axis = 0;
+    } else if (settings_name_steq(name, "y", &next) && next == NULL) {
+        axis = 1;
+    }
+    if (axis < 0 || len != sizeof(struct iqs9151_map_record)) {
+        return -ENOENT;
+    }
+    if (read_cb(cb_arg, &iqs9151_map_saved[axis], sizeof(iqs9151_map_saved[axis])) !=
+        sizeof(iqs9151_map_saved[axis])) {
+        return -EIO;
+    }
+    iqs9151_map_saved_valid[axis] = iqs9151_map_saved[axis].resolution != 0U;
+    return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(iqs9151_map, "iqs9151/map", NULL, iqs9151_map_settings_set, NULL,
+                               NULL);
+#endif
+
+static void iqs9151_map_rebuild(struct iqs9151_ripple_map *map);
+
+static void iqs9151_map_clear(struct iqs9151_ripple_map *map, uint16_t resolution) {
+    memset(map->g, 0, sizeof(map->g));
+    memset(map->n, 0, sizeof(map->n));
+    for (size_t i = 0; i < IQS9151_MAP_BINS; i++) {
+        map->corr[i] = 256;
+    }
+    memset(&map->ref, 0, sizeof(map->ref));
+    map->resolution = resolution;
+    map->have_prev = false;
+    map->rem_fp = 0;
+    map->tick = 0;
+    map->dirty = false;
+}
+
+/* Start from what was saved, if it was learned at this resolution. */
+static void iqs9151_map_restore(struct iqs9151_ripple_map *map, char axis, uint16_t resolution) {
+    const int i = (axis == 'y') ? 1 : 0;
+    iqs9151_map_clear(map, resolution);
+    if (!iqs9151_map_saved_valid[i] || iqs9151_map_saved[i].resolution != resolution) {
+        return;
+    }
+    uint32_t restored = 0;
+    for (size_t b = 0; b < IQS9151_MAP_BINS; b++) {
+        const uint8_t q6 = iqs9151_map_saved[i].g[b];
+        if (q6 != 0U) {
+            map->g[b] = (int16_t)((uint32_t)q6 * IQS9151_MAP_ONE / 64U);
+            map->n[b] = IQS9151_MAP_MIN_SAMPLES;
+            restored++;
+        }
+    }
+    iqs9151_map_rebuild(map);
+    LOG_INF("ripple map %c: %u of %u bins restored", axis, restored, IQS9151_MAP_BINS);
+}
+
+static void iqs9151_map_save(struct iqs9151_ripple_map *map, char axis, int64_t now_ms) {
+    if (!map->dirty || (now_ms - map->saved_ms) < IQS9151_MAP_SAVE_MIN_MS) {
+        return;
+    }
+    const int i = (axis == 'y') ? 1 : 0;
+    struct iqs9151_map_record *rec = &iqs9151_map_saved[i];
+    rec->resolution = map->resolution;
+    for (size_t b = 0; b < IQS9151_MAP_BINS; b++) {
+        rec->g[b] = (map->n[b] >= IQS9151_MAP_MIN_SAMPLES)
+                        ? (uint8_t)CLAMP((map->g[b] * 64 + IQS9151_MAP_ONE / 2) / IQS9151_MAP_ONE,
+                                         1, 255)
+                        : 0U;
+    }
+    iqs9151_map_saved_valid[i] = true;
+    map->dirty = false;
+    map->saved_ms = now_ms;
+#if IS_ENABLED(CONFIG_SETTINGS)
+    const int ret = settings_save_one((axis == 'y') ? "iqs9151/map/y" : "iqs9151/map/x", rec,
+                                      sizeof(*rec));
+    if (ret != 0) {
+        LOG_WRN("ripple map %c: could not save (%d)", axis, ret);
+    }
+#endif
+}
+
+/*
+ * The correction table from the learned ratios: mean(g) / g per bin, so
+ * that a stroke's total travel is what it was. A bin that has not seen
+ * enough corrects nothing. Not smoothed across bins: a bin is a tenth of
+ * the wave and the wave's second harmonic is a fifth, so even a three-bin
+ * kernel takes a third of that harmonic away again (measured: the residual
+ * doubles). The per-bin average does the smoothing, over samples.
+ */
+static void iqs9151_map_rebuild(struct iqs9151_ripple_map *map) {
+    uint32_t sum = 0, cnt = 0;
+    for (size_t b = 0; b < IQS9151_MAP_BINS; b++) {
+        if (map->n[b] >= IQS9151_MAP_MIN_SAMPLES && map->g[b] > 0) {
+            sum += (uint32_t)map->g[b];
+            cnt++;
+        }
+    }
+    if (cnt == 0U) {
+        return;
+    }
+    const uint32_t mean = sum / cnt;
+    for (size_t b = 0; b < IQS9151_MAP_BINS; b++) {
+        if (map->n[b] >= IQS9151_MAP_MIN_SAMPLES && map->g[b] > 0) {
+            map->corr[b] =
+                (uint16_t)CLAMP((mean * 256U + (uint32_t)map->g[b] / 2U) / (uint32_t)map->g[b],
+                                IQS9151_MAP_CORR_MIN, IQS9151_MAP_CORR_MAX);
+        } else {
+            map->corr[b] = 256;
+        }
+    }
+}
+
+static uint32_t iqs9151_map_bin(const struct iqs9151_ripple_map *map, uint32_t pos) {
+    const uint32_t res = MAX(1U, (uint32_t)map->resolution);
+    return MIN(IQS9151_MAP_BINS - 1U, (pos * IQS9151_MAP_BINS) / res);
+}
+
+/*
+ * The correction at a position, interpolated between the two nearest bin
+ * centres. A bin is a tenth of the wave on the long axis, and the wave is
+ * steep between its crest and trough: read as a staircase the table would
+ * leave a fifth of the ripple behind; read as a line through the bin
+ * centres it leaves a few percent.
+ */
+static uint32_t iqs9151_map_corr_at(const struct iqs9151_ripple_map *map, uint32_t pos) {
+    const uint32_t res = MAX(1U, (uint32_t)map->resolution);
+    /* position in 1/256 bins */
+    const uint32_t q = MIN((IQS9151_MAP_BINS << 8) - 1U, (pos * (IQS9151_MAP_BINS << 8)) / res);
+    const uint32_t b = q >> 8;
+    const uint32_t frac = q & 0xFFU; /* 128 = the centre of bin b */
+    uint32_t other, w;                 /* the neighbour to lean on, and how much (0..256) */
+    if (frac >= 128U) {
+        other = (b + 1U < IQS9151_MAP_BINS) ? b + 1U : b;
+        w = frac - 128U;
+    } else {
+        other = (b > 0U) ? b - 1U : b;
+        w = 128U - frac;
+    }
+    return ((256U - w) * map->corr[b] + w * map->corr[other] + 128U) >> 8;
+}
+
+static void iqs9151_map_lift(struct iqs9151_ripple_map *map, char axis, int64_t now_ms) {
+    memset(&map->ref, 0, sizeof(map->ref));
+    map->have_prev = false;
+    map->rem_fp = 0;
+    iqs9151_map_save(map, axis, now_ms);
+}
+
+static int16_t iqs9151_map_apply(struct iqs9151_ripple_map *map, char axis, uint16_t abs_pos,
+                                 int16_t value, int64_t now_ms) {
+    const uint16_t resolution = (uint16_t)atomic_get(
+        (axis == 'y') ? &iqs9151_requested_resolution_y : &iqs9151_requested_resolution_x);
+    if (resolution == 0U) {
+        return value; /* before the first resolution request is served */
+    }
+    if (map->resolution != resolution) {
+        /* A new scale is a new pad as far as the table is concerned. */
+        iqs9151_map_restore(map, axis, resolution);
+    }
+
+    /* The movement in this report happened between last frame's position
+     * and this one's; it belongs to the bin in the middle. */
+    const uint32_t mid = map->have_prev ? ((uint32_t)map->prev_abs + abs_pos) / 2U : abs_pos;
+    const bool had_prev = map->have_prev;
+    map->prev_abs = abs_pos;
+    map->have_prev = true;
+    const uint32_t bin = iqs9151_map_bin(map, mid);
+
+    /* The reference: the local mean over one period of the wave (half an
+     * electrode pitch, from the geometry), so the ratio is to what the
+     * finger really did with the wave averaged out. The window holds a
+     * limited number of reports, so it must not be longer than a slow
+     * stroke can fill. */
+    const int32_t period = MAX(8, (int32_t)iqs9151_ripple_expected_x10(axis, resolution) / 10);
+    const uint32_t spans = iqs9151_ripple_ref_push(&map->ref, value, period);
+
+    if (had_prev && spans > 0U && (int32_t)map->ref.dist >= period) {
+        const int32_t mag = MIN(255, (value < 0) ? -(int32_t)value : (int32_t)value);
+        /* sample = (mag/spans) / (dist/frames), Q12, capped at 4.0. */
+        const int64_t ratio = ((int64_t)mag * map->ref.frames * IQS9151_MAP_ONE) /
+                              ((int64_t)map->ref.dist * spans);
+        const int32_t sample = (int32_t)MIN(ratio, 4 * IQS9151_MAP_ONE);
+
+        if (map->n[bin] == 0U) {
+            map->g[bin] = (int16_t)sample;
+        } else {
+            map->g[bin] = (int16_t)(map->g[bin] + ((sample - map->g[bin]) >> IQS9151_MAP_MU_SHIFT));
+        }
+        if (map->n[bin] < UINT8_MAX) {
+            map->n[bin]++;
+        }
+        map->dirty = true;
+
+        if (++map->tick >= IQS9151_MAP_REBUILD_EVERY) {
+            map->tick = 0;
+            iqs9151_map_rebuild(map);
+        }
+
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_MOTION_TRACE)
+        /* Two and a half periods from the middle of the pad, in percent,
+         * so the devtool log shows the wave's shape and depth as learned;
+         * and how many bins have enough to correct. */
+        if (++map->updates >= IQS9151_MAP_TRACE_EVERY) {
+            map->updates = 0;
+            uint32_t learned = 0;
+            for (size_t b = 0; b < IQS9151_MAP_BINS; b++) {
+                learned += (map->n[b] >= IQS9151_MAP_MIN_SAMPLES) ? 1U : 0U;
+            }
+            char line[120];
+            size_t at = 0;
+            for (size_t b = 104; b < 128 && at + 5 < sizeof(line); b++) {
+                at += (size_t)snprintf(&line[at], sizeof(line) - at, " %u",
+                                       (unsigned)((map->corr[b] * 100U + 128U) / 256U));
+            }
+            LOG_WRN("map %c learned %u/%u c104..127:%s", axis, learned, IQS9151_MAP_BINS, line);
+        }
+#endif
+    }
+
+    /* Divide the ripple out of this report, carrying the fraction. */
+    map->rem_fp += (int32_t)value * (int32_t)iqs9151_map_corr_at(map, mid);
+    int32_t out = map->rem_fp / 256; /* toward zero; the carry keeps its sign */
+    map->rem_fp -= out * 256;
+    return (int16_t)CLAMP(out, INT16_MIN, INT16_MAX);
+}
+
 static int16_t iqs9151_ripple_apply(struct iqs9151_ripple_eq *eq, char axis, uint16_t abs_pos,
                                     int16_t value, uint16_t setting_x10, bool scanning) {
     const uint16_t resolution = (uint16_t)atomic_get(
@@ -3789,8 +4092,8 @@ static int16_t iqs9151_ripple_apply(struct iqs9151_ripple_eq *eq, char axis, uin
     return (int16_t)CLAMP(out, INT16_MIN, INT16_MAX);
 }
 
-static void iqs9151_apply_cursor_gain(struct iqs9151_data *data,
-                                      struct iqs9151_frame *frame) {
+static void iqs9151_apply_cursor_gain(struct iqs9151_data *data, struct iqs9151_frame *frame,
+                                      int64_t now_ms) {
     if (frame->finger_count != 1U) {
         /*
          * Finger gone, or a second one down: drop what is owed rather than
@@ -3806,17 +4109,27 @@ static void iqs9151_apply_cursor_gain(struct iqs9151_data *data,
         /* The equalisers keep what they learned; only the stroke state goes. */
         iqs9151_ripple_lift(&data->ripple_x);
         iqs9151_ripple_lift(&data->ripple_y);
+        iqs9151_map_lift(&data->map_x, 'x', now_ms);
+        iqs9151_map_lift(&data->map_y, 'y', now_ms);
         return;
     }
 
     /* First, because it is the only stage that needs the absolute position,
      * and because the ripple lives in the raw counts: everything after this
-     * sees a report with the wave already divided out. */
-    const bool scanning = atomic_get(&iqs9151_ripple_auto) != 0;
-    frame->rel_x = iqs9151_ripple_apply(&data->ripple_x, 'x', frame->finger1_x, frame->rel_x,
-                                        (uint16_t)atomic_get(&iqs9151_ripple_period_x), scanning);
-    frame->rel_y = iqs9151_ripple_apply(&data->ripple_y, 'y', frame->finger1_y, frame->rel_y,
-                                        (uint16_t)atomic_get(&iqs9151_ripple_period_y), scanning);
+     * sees a report with the wave already divided out. The position map
+     * when it is on; else the period equaliser, searching or told. */
+    if (atomic_get(&iqs9151_ripple_map_on) != 0) {
+        frame->rel_x = iqs9151_map_apply(&data->map_x, 'x', frame->finger1_x, frame->rel_x, now_ms);
+        frame->rel_y = iqs9151_map_apply(&data->map_y, 'y', frame->finger1_y, frame->rel_y, now_ms);
+    } else {
+        const bool scanning = atomic_get(&iqs9151_ripple_auto) != 0;
+        frame->rel_x =
+            iqs9151_ripple_apply(&data->ripple_x, 'x', frame->finger1_x, frame->rel_x,
+                                 (uint16_t)atomic_get(&iqs9151_ripple_period_x), scanning);
+        frame->rel_y =
+            iqs9151_ripple_apply(&data->ripple_y, 'y', frame->finger1_y, frame->rel_y,
+                                 (uint16_t)atomic_get(&iqs9151_ripple_period_y), scanning);
+    }
 
     const int32_t window = (int32_t)atomic_get(&iqs9151_cursor_distance_window);
     frame->rel_x = iqs9151_distance_smooth_axis(&data->dist_smoother_x, frame->rel_x, window);
@@ -3906,7 +4219,7 @@ static void iqs9151_work_cb(struct k_work *work) {
     /* Before anything reads the deltas. Only the cursor path uses rel_x/rel_y
      * -- the gestures work from the absolute finger coordinates -- so this
      * changes pointer speed and nothing else. */
-    iqs9151_apply_cursor_gain(data, &frame);
+    iqs9151_apply_cursor_gain(data, &frame, now_ms);
 
     iqs9151_process_frame(data, &frame, now_ms);
 

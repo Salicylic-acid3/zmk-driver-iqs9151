@@ -168,6 +168,13 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
     ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
     ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
+ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
+    iqs9151_ripple_map, IQS9151_SETTINGS_SUBSYSTEM_ID, IQS9151_SETTING_RIPPLE_MAP_KEY,
+    ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL,
+    ZMK_CUSTOM_SETTING_VALUE_BOOL(IS_ENABLED(CONFIG_INPUT_IQS9151_RIPPLE_MAP)),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
 /*
  * What the search concluded, written by the driver rather than the owner.
  * There is no read-only permission, so the app draws these as text rather
@@ -310,6 +317,8 @@ static void apply_cursor_gain(void) {
     }
     (void)iqs9151_set_ripple_auto(read_bool(IQS9151_SETTING_RIPPLE_AUTO_KEY,
                                             IS_ENABLED(CONFIG_INPUT_IQS9151_RIPPLE_AUTO)));
+    (void)iqs9151_set_ripple_map(read_bool(IQS9151_SETTING_RIPPLE_MAP_KEY,
+                                           IS_ENABLED(CONFIG_INPUT_IQS9151_RIPPLE_MAP)));
 
     const int32_t interval = read_int32(IQS9151_SETTING_CURSOR_REPORT_INTERVAL_KEY,
                                         CONFIG_INPUT_IQS9151_CURSOR_REPORT_INTERVAL_MS);
@@ -402,6 +411,7 @@ static int iqs9151_settings_event_listener(const zmk_event_t *eh) {
                strcmp(changed->setting->key, IQS9151_SETTING_RIPPLE_PERIOD_X_X10_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_RIPPLE_PERIOD_Y_X10_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_RIPPLE_AUTO_KEY) == 0 ||
+               strcmp(changed->setting->key, IQS9151_SETTING_RIPPLE_MAP_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_CURSOR_REPORT_INTERVAL_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_SWIPE3_THRESHOLD_X_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_SWIPE3_THRESHOLD_Y_KEY) == 0) {

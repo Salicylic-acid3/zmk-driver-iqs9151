@@ -218,6 +218,19 @@ config INPUT_IQS9151_RIPPLE_PERIOD_X_X10
       open. The wave is on the coarse axis only, so leave the other axis at 0
       unless it too measures a period.
 
+config INPUT_IQS9151_RIPPLE_MAP
+    bool "IQS9151 correct the positional ripple with a map learned over the pad"
+    default y
+    help
+      Instead of a wave shape at a known period, a table of 256 bins across
+      each axis, each learning the ratio of the movement reported there to
+      the local average. Needs no period and no search: whatever the shape
+      of the nonlinearity -- electrode pitch, edges, an uneven electrode --
+      it is in the table after three or four full-length strokes, and is
+      divided out of every report from then on. Kept across power cycles,
+      forgotten when the pad scale changes. While this is on the period
+      equaliser and its search below are idle. Also a runtime setting.
+
 config INPUT_IQS9151_RIPPLE_AUTO
     bool "IQS9151 find the positional ripple period by itself"
     default y

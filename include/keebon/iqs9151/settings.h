@@ -100,6 +100,11 @@
  * starting point. See iqs9151_set_ripple_auto in control.h. */
 #define IQS9151_SETTING_RIPPLE_AUTO_KEY "ripple_auto"
 
+/* Correct with a map learned over the pad's positions rather than a wave at a
+ * period; the period keys and the search are idle while this is on. See
+ * iqs9151_set_ripple_map in control.h. */
+#define IQS9151_SETTING_RIPPLE_MAP_KEY "ripple_map"
+
 /* What the search found, per axis, in tenths of a count; 0 is nothing yet.
  * Written by the driver, for the app to show -- the one way to tell, without
  * a debug build, whether a pad has locked on to its wave or is still looking.

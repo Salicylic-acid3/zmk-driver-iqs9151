@@ -136,6 +136,10 @@ int iqs9151_set_swipe3_threshold(uint16_t x_counts, uint16_t y_counts);
  */
 int iqs9151_set_ripple_auto(bool enabled);
 
+/* Correct the ripple with the learned position map instead of the period
+ * equaliser. See INPUT_IQS9151_RIPPLE_MAP. */
+int iqs9151_set_ripple_map(bool enabled);
+
 /**
  * The device's own low-speed filtering, as one block.
  *
