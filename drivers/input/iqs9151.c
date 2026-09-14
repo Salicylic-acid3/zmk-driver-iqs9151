@@ -4934,12 +4934,15 @@ static void iqs9151_apply_requested_filter(const struct device *dev) {
     tune = iqs9151_requested_filter;
     k_spin_unlock(&iqs9151_filter_lock, key);
 
-    uint8_t block[7];
+    /* 0x11EA..0x11F1: the filter registers and, right after them, the
+     * finger split factor, in one write. */
+    uint8_t block[8];
     sys_put_le16(tune.bottom_speed, &block[0]);
     sys_put_le16(tune.top_speed, &block[2]);
     block[4] = tune.bottom_beta;
     block[5] = tune.static_beta;
     block[6] = tune.stationary_threshold;
+    block[7] = tune.finger_split;
 
     int ret = iqs9151_i2c_write(cfg, IQS9151_ADDR_XY_DYNAMIC_FILTER_BOTTOM_SPEED, block,
                                 sizeof(block));
@@ -4966,9 +4969,11 @@ static void iqs9151_apply_requested_filter(const struct device *dev) {
     }
 
     atomic_set(&data->filter_generation, generation);
-    LOG_INF("Trackpad filter: speed %u..%u, beta %u/%u, stationary %u, jitter %u, touch %u/%u",
+    LOG_INF("Trackpad filter: speed %u..%u, beta %u/%u, stationary %u, jitter %u, touch %u/%u, "
+            "split %u",
             tune.bottom_speed, tune.top_speed, tune.bottom_beta, tune.static_beta,
-            tune.stationary_threshold, tune.jitter_delta, tune.touch_set, tune.touch_clear);
+            tune.stationary_threshold, tune.jitter_delta, tune.touch_set, tune.touch_clear,
+            tune.finger_split);
 }
 
 static const struct iqs9151_filter_tune iqs9151_kconfig_filter = {
@@ -4980,6 +4985,7 @@ static const struct iqs9151_filter_tune iqs9151_kconfig_filter = {
     .jitter_delta = CONFIG_INPUT_IQS9151_JITTER_FILTER_DELTA,
     .touch_set = CONFIG_INPUT_IQS9151_TOUCH_SET_THRESHOLD,
     .touch_clear = CONFIG_INPUT_IQS9151_TOUCH_CLEAR_THRESHOLD,
+    .finger_split = CONFIG_INPUT_IQS9151_FINGER_SPLIT_FACTOR,
 };
 
 /*

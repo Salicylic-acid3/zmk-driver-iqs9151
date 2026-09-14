@@ -404,6 +404,19 @@ config INPUT_IQS9151_STATIC_FILTER_BETA
       XY Static Filter Beta (0x11EF): filtering applied while the finger is
       judged stationary. Higher is more. The device's own default is 128.
 
+config INPUT_IQS9151_FINGER_SPLIT_FACTOR
+    int "IQS9151 finger split factor"
+    range 0 255
+    default 3
+    help
+      Finger Split Factor (0x11F1): how readily one touched area is
+      taken for two fingers. Two fingers close together raise one blob
+      with a dip between the peaks, and this decides how deep the dip
+      must be before the device reports two fingers rather than one --
+      two fingers that stay one finger are a two-finger scroll that never
+      starts. 0 never splits. The init table's 3 is the device default;
+      also the runtime setting finger_split_factor.
+
 config INPUT_IQS9151_STATIONARY_TOUCH_MOV_THRESHOLD
     int "IQS9151 stationary touch movement threshold"
     range 0 255

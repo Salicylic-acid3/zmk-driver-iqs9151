@@ -185,6 +185,9 @@ struct iqs9151_filter_tune {
      * it: lower is smoother and more sensitive, higher is the reverse. */
     uint8_t touch_set;
     uint8_t touch_clear;
+    /* Finger split factor (0x11F1): how readily one touched area is taken
+     * for two fingers. 0 never splits. */
+    uint8_t finger_split;
 };
 
 /**

@@ -147,6 +147,9 @@
  * the centroid of: 44/38 is the IC's conservative default, 26/20 smooth. */
 #define IQS9151_SETTING_TOUCH_SET_THRESHOLD_KEY "touch_set_threshold"
 #define IQS9151_SETTING_TOUCH_CLEAR_THRESHOLD_KEY "touch_clear_threshold"
+/* Finger split factor, 0..255 (0x11F1): how readily two fingers close
+ * together are told apart. 0 never splits; the device default is 3. */
+#define IQS9151_SETTING_FINGER_SPLIT_KEY "finger_split_factor"
 
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_RUNTIME_SETTINGS)
 

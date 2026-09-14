@@ -272,6 +272,8 @@ IQS9151_FILTER_SETTING(iqs9151_touch_set_threshold, IQS9151_SETTING_TOUCH_SET_TH
                        CONFIG_INPUT_IQS9151_TOUCH_SET_THRESHOLD, 255);
 IQS9151_FILTER_SETTING(iqs9151_touch_clear_threshold, IQS9151_SETTING_TOUCH_CLEAR_THRESHOLD_KEY,
                        CONFIG_INPUT_IQS9151_TOUCH_CLEAR_THRESHOLD, 255);
+IQS9151_FILTER_SETTING(iqs9151_finger_split_factor, IQS9151_SETTING_FINGER_SPLIT_KEY,
+                       CONFIG_INPUT_IQS9151_FINGER_SPLIT_FACTOR, 255);
 
 /*
  * Fall back to the compiled-in value on any error, rather than propagating it.
@@ -400,6 +402,9 @@ static void apply_filter(void) {
         .touch_clear = (uint8_t)CLAMP(read_int32(IQS9151_SETTING_TOUCH_CLEAR_THRESHOLD_KEY,
                                                  CONFIG_INPUT_IQS9151_TOUCH_CLEAR_THRESHOLD),
                                       1, 255),
+        .finger_split = (uint8_t)CLAMP(
+            read_int32(IQS9151_SETTING_FINGER_SPLIT_KEY, CONFIG_INPUT_IQS9151_FINGER_SPLIT_FACTOR),
+            0, 255),
     };
 
     (void)iqs9151_request_filter(&tune);
@@ -471,7 +476,8 @@ static int iqs9151_settings_event_listener(const zmk_event_t *eh) {
                strcmp(changed->setting->key, IQS9151_SETTING_STATIONARY_THRESHOLD_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_JITTER_DELTA_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_TOUCH_SET_THRESHOLD_KEY) == 0 ||
-               strcmp(changed->setting->key, IQS9151_SETTING_TOUCH_CLEAR_THRESHOLD_KEY) == 0) {
+               strcmp(changed->setting->key, IQS9151_SETTING_TOUCH_CLEAR_THRESHOLD_KEY) == 0 ||
+               strcmp(changed->setting->key, IQS9151_SETTING_FINGER_SPLIT_KEY) == 0) {
         apply_filter();
     }
 
