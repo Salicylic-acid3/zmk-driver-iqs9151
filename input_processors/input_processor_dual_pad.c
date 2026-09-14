@@ -291,7 +291,7 @@ static int dual_pad_init(const struct device *dev) { return 0; }
                 (ZMK_KEYMAP_EXTRACT_BINDING(0, DT_DRV_INST(n))), ({0}))
 
 #define DUAL_PAD_INST(n)                                                                           \
-    static struct dual_pad_data dual_pad_data_##n = {0};                                           \
+    static struct dual_pad_data dual_pad_data_##n;                                                 \
     static const struct dual_pad_config dual_pad_config_##n = {                                    \
         .index = n,                                                                                \
         .touch_code = DT_INST_PROP_OR(n, touch_code, INPUT_BTN_8),                                 \

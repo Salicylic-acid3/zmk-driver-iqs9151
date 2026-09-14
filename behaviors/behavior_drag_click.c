@@ -181,10 +181,10 @@ static int drag_click_released(struct zmk_behavior_binding *binding,
 #define DRAG_CLICK_DECLARE(n) static struct drag_click_data drag_click_data_##n;
 DT_INST_FOREACH_STATUS_OKAY(DRAG_CLICK_DECLARE)
 
-#define DRAG_CLICK_DATA_PTR(n) (&drag_click_data_##n)
+#define DRAG_CLICK_DATA_PTR(n) &drag_click_data_##n,
 
 static struct drag_click_data *const drag_click_instances[] = {
-    DT_INST_FOREACH_STATUS_OKAY_SEP(DRAG_CLICK_DATA_PTR, (, ))};
+    DT_INST_FOREACH_STATUS_OKAY(DRAG_CLICK_DATA_PTR)};
 
 /* Runs in the input thread: hand the actual release to the system work queue
  * so it happens where behaviors normally run. */
