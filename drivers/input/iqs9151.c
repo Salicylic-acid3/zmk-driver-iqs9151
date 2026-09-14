@@ -3011,10 +3011,14 @@ static void iqs9151_process_frame(struct iqs9151_data *data,
      * carry a zero delta (a direction reversal within the frame) still counts.
      * Every consumer of this flag is already guarded by finger_count == 1.
      */
+    /* Evaluated every frame, not only on moving ones: the landing frame
+     * itself usually carries no movement, and it is the one that sets the
+     * zone's centre. */
+    const bool in_landing_zone = iqs9151_in_landing_zone(data, frame, &prev_frame, now_ms);
     const bool cursor_moving = (frame->finger_count == 1U) &&
                                (((frame->trackpad_flags & IQS9151_TP_MOVEMENT_DETECTED) != 0U) ||
                                 frame->rel_x != 0 || frame->rel_y != 0) &&
-                               !iqs9151_in_landing_zone(data, frame, &prev_frame, now_ms);
+                               !in_landing_zone;
     bool released_from_hold;
     bool suppress_cursor_tail;
 
