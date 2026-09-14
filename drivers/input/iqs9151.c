@@ -4917,6 +4917,19 @@ static int iqs9151_apply_kconfig_overrides(const struct device *dev) {
         LOG_WRN("Failed to apply ATI target (%d), keeping the device default", ret);
     }
 
+    /* Set and clear are adjacent bytes; one write for the pair. */
+    {
+        const uint8_t thresholds[2] = {
+            (uint8_t)CONFIG_INPUT_IQS9151_TOUCH_SET_THRESHOLD,
+            (uint8_t)CONFIG_INPUT_IQS9151_TOUCH_CLEAR_THRESHOLD,
+        };
+        ret = iqs9151_i2c_write(cfg, IQS9151_ADDR_TOUCH_SET_THRESHOLD, thresholds,
+                                sizeof(thresholds));
+        if (ret != 0) {
+            LOG_WRN("Failed to apply touch thresholds (%d), keeping the init table's", ret);
+        }
+    }
+
     ret = iqs9151_write_u16(cfg, IQS9151_ADDR_X_RESOLUTION,
                             (uint16_t)CONFIG_INPUT_IQS9151_RESOLUTION_X);
     if (ret != 0) {

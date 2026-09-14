@@ -306,9 +306,39 @@ config INPUT_IQS9151_ATI_TARGETCOUNT
     range 0 1000
     default 250
     help
-      Trackpad ATI Target (0x119A).
+      Trackpad ATI Target (0x1196): the count every channel is tuned to
+      at rest, which sets the gain of the whole pad. Written after the
+      init table (whose own value is 300) and again after a device reset.
       Limited to 0-1000 to avoid unstable behavior.
-      Currently not applied by the driver.
+
+config INPUT_IQS9151_TOUCH_SET_THRESHOLD
+    int "IQS9151 trackpad touch set threshold multiplier"
+    range 1 255
+    default 44
+    help
+      Touch Set Threshold Multiplier (0x11CC): how far a channel's count
+      must rise above its reference, as a fraction of the reference, for
+      that channel to count as touched. The device's position is the
+      centroid of the touched channels, so this decides how many
+      electrodes around the finger take part in it. High: only the one or
+      two under the finger, and the position steps from electrode to
+      electrode -- a wave in the pointer's speed with the electrode
+      pitch. Low: the weaker neighbours join and the position is smooth,
+      until too low lets noise or a hovering palm count as a touch. The
+      init table's 44 is the conservative end; another trackpad on this
+      IC was reported smooth at 26. Written after the init table and
+      again after a device reset.
+
+config INPUT_IQS9151_TOUCH_CLEAR_THRESHOLD
+    int "IQS9151 trackpad touch clear threshold multiplier"
+    range 1 255
+    default 38
+    help
+      Touch Clear Threshold Multiplier (0x11CD): the level a touched
+      channel must fall back below to be released. Keep it a little
+      under the set threshold (the gap is the hysteresis that stops a
+      channel flickering at the edge of the finger); 20 goes with a set
+      threshold of 26.
 
 config INPUT_IQS9151_DYNAMIC_FILTER_BOTTOM_SPEED
     int "IQS9151 dynamic filter bottom speed"
