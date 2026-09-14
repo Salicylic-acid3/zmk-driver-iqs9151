@@ -2631,7 +2631,7 @@ static bool iqs9151_handle_show_reset(struct iqs9151_data *data,
         return true;
     }
 
-    LOG_WRN("SHOW_RESET detected: info=0x%04x - restoring configuration", frame->info_flags);
+    LOG_WRN("SHOW_RESET info=0x%04x: restoring configuration", frame->info_flags);
     iqs9151_set_touch_state(data, 0U);
     iqs9151_reset_gesture_states(data, dev, true);
     iqs9151_inertia_cancel(&data->inertia_scroll, &data->inertia_scroll_work);
@@ -3663,10 +3663,11 @@ static uint16_t iqs9151_ripple_scan_verdict(struct iqs9151_ripple_scan *scan, ch
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_MOTION_TRACE)
     {
         const uint16_t top = scan->base_x10 + (scan->count - 1U) * scan->step_x10;
-        LOG_WRN("eqscan %c %s %u.%u-%u.%u peak %u.%u amp %d pack %d", axis,
-                coarse ? "coarse" : "fine", scan->base_x10 / 10U, scan->base_x10 % 10U,
-                top / 10U, top % 10U, estimate / 10U, estimate % 10U,
-                iqs9151_ripple_milli((int32_t)amp[best]), iqs9151_ripple_milli((int32_t)pack));
+        /* Short: the devtool keeps 47 characters of a line. */
+        LOG_WRN("eqs %c %c %u.%u-%u.%u pk %u.%u a%d p%d", axis, coarse ? 'c' : 'f',
+                scan->base_x10 / 10U, scan->base_x10 % 10U, top / 10U, top % 10U,
+                estimate / 10U, estimate % 10U, iqs9151_ripple_milli((int32_t)amp[best]),
+                iqs9151_ripple_milli((int32_t)pack));
     }
 #else
     ARG_UNUSED(axis);
@@ -4035,22 +4036,27 @@ static int16_t iqs9151_map_apply(struct iqs9151_ripple_map *map, char axis, uint
         }
 
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_MOTION_TRACE)
-        /* Two and a half periods from the middle of the pad, in percent,
-         * so the devtool log shows the wave's shape and depth as learned;
-         * and how many bins have enough to correct. */
+        /* Almost two periods from the middle of the pad, in percent, so
+         * the devtool log shows the wave's shape and depth as learned; and
+         * how many bins have enough to correct. Two lines of nine bins:
+         * the devtool keeps 47 characters of a line and drops the rest.
+         *   "mx 96 104: 100 100 ..." = axis x, 96 bins learned, bins 104..
+         */
         if (++map->updates >= IQS9151_MAP_TRACE_EVERY) {
             map->updates = 0;
             uint32_t learned = 0;
             for (size_t b = 0; b < IQS9151_MAP_BINS; b++) {
                 learned += (map->n[b] >= IQS9151_MAP_MIN_SAMPLES) ? 1U : 0U;
             }
-            char line[100];
-            size_t at = 0;
-            for (size_t b = 104; b < 128 && at + 5 < sizeof(line); b++) {
-                at += (size_t)snprintf(&line[at], sizeof(line) - at, " %u",
-                                       (unsigned)((map->corr[b] * 100U + 128U) / 256U));
+            for (size_t from = 104; from < 122; from += 9) {
+                char line[40];
+                size_t at = 0;
+                for (size_t b = from; b < from + 9 && at + 5 < sizeof(line); b++) {
+                    at += (size_t)snprintf(&line[at], sizeof(line) - at, " %u",
+                                           (unsigned)((map->corr[b] * 100U + 128U) / 256U));
+                }
+                LOG_WRN("m%c %u %u:%s", axis, learned, (unsigned)from, line);
             }
-            LOG_WRN("map %c learned %u/%u c104..127:%s", axis, learned, IQS9151_MAP_BINS, line);
         }
 #endif
     }
@@ -4958,7 +4964,9 @@ static void iqs9151_recover_work_handler(struct k_work *work) {
         LOG_WRN("ATI re-tune failed after reset (%d); carrying on with what is set", ret);
     }
 
-    LOG_INF("Trackpad configuration restored (reset #%u)", data->recover_count);
+    /* A warning, like the reset it answers: a devtool build that keeps only
+     * warnings still shows how many times the pad has come back. */
+    LOG_WRN("Trackpad configuration restored (reset #%u)", data->recover_count);
 
 done:
     atomic_set(&data->recovering, 0);
