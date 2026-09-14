@@ -18,3 +18,12 @@ menuconfig ZMK_BEHAVIOR_ZIP_DYNAMIC_SCALE_SET
     help
       Enable the behavior that sets the dynamic scale factor used by
       the dynamic scaler input processor.
+
+menuconfig ZMK_BEHAVIOR_DRAG_CLICK
+    bool "Drag click behavior"
+    default y
+    help
+      A mouse button key that keeps the button pressed after the key is
+      released for as long as a finger is on either trackpad. Uses the raw
+      touch state event (INPUT_IQS9151_TOUCH_STATE_ENABLE) to know when the
+      last finger leaves.

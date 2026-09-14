@@ -19,6 +19,16 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/behavior.h>
 #include <zmk/virtual_key_position.h>
 
+/*
+ * Code the matched event is rewritten to. It must be one nothing downstream
+ * reacts to: not BTN_0..4 or BTN_TOUCH (the listener turns those into mouse
+ * buttons) and not BTN_8/BTN_9 (the IQS9151 driver's touch state events,
+ * which dual_pad and the drag click behavior read - rewriting to BTN_8 with
+ * value 0 looked like "all fingers lifted" to them). 0x10F sits in the gap
+ * between BTN_9 and BTN_MOUSE that Linux leaves undefined.
+ */
+#define IP_BEHAVIORS_CONSUME_NEUTRAL_CODE 0x10F
+
 struct ip_behaviors_config {
     uint8_t index;
     size_t size;
@@ -60,7 +70,7 @@ static int ip_behaviors_consume_handle_event(const struct device *dev, struct in
 
             /* Neutralize the event so the listener doesn't emit a mouse click. */
             event->type = INPUT_EV_KEY;
-            event->code = INPUT_BTN_8;
+            event->code = IP_BEHAVIORS_CONSUME_NEUTRAL_CODE;
             event->value = 0;
 
             return ZMK_INPUT_PROC_CONTINUE;

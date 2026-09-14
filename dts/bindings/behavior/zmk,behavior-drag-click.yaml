@@ -1,0 +1,44 @@
+description: |
+  Mouse button that stays pressed while a finger is on a trackpad.
+
+  Pressing the key presses the mouse button and, when "layer" is set,
+  activates that layer (like &mkp together with &mo). Releasing the key
+  releases both immediately unless a finger is on one of the trackpads; then
+  the release waits until every finger has left, so a drag started with the
+  switch under the pad continues while the finger keeps moving.
+
+  Needs CONFIG_INPUT_IQS9151_TOUCH_STATE_ENABLE=y on every half whose pad
+  should count, and a zmk,input-listener whose "device" is this node so the
+  button reaches the HID report:
+
+      drag_lclk: drag_lclk {
+          compatible = "zmk,behavior-drag-click";
+          #binding-cells = <0>;
+          display-name = "Left Click (Drag)";
+          button = <0>;
+          layer = <2>;
+      };
+      drag_lclk_listener {
+          compatible = "zmk,input-listener";
+          device = <&drag_lclk>;
+      };
+
+compatible: "zmk,behavior-drag-click"
+
+properties:
+  display-name:
+    type: string
+
+  "#binding-cells":
+    type: int
+    required: true
+    const: 0
+
+  button:
+    type: int
+    default: 0
+    description: Mouse button, 0..4 = MB1..MB5. Default 0 (left).
+
+  layer:
+    type: int
+    description: Layer index to hold together with the button. Omit for none.
