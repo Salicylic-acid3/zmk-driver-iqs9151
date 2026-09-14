@@ -217,6 +217,12 @@ void iqs9151_setting_map_learned(char axis, uint16_t bins) {
     (void)zmk_custom_setting_set_int32(setting, bins, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
 }
 
+void iqs9151_setting_ripple_measured(char axis, uint16_t period_x10) {
+    const struct zmk_custom_setting *setting =
+        (axis == 'y') ? &iqs9151_ripple_found_y : &iqs9151_ripple_found_x;
+    (void)zmk_custom_setting_set_int32(setting, period_x10, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+}
+
 void iqs9151_setting_ripple_found(char axis, uint16_t period_x10) {
     const struct zmk_custom_setting *setting =
         (axis == 'y') ? &iqs9151_ripple_found_y : &iqs9151_ripple_found_x;

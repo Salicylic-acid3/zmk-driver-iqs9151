@@ -152,6 +152,11 @@ void iqs9151_setting_ripple_found(char axis, uint16_t period_x10);
 /* The driver reporting how many bins of the position map can correct. */
 void iqs9151_setting_map_learned(char axis, uint16_t bins);
 
+/* The position map reporting the period it measured from its table. Shown
+ * as ripple_found_*, in memory only: it is called from the frame work,
+ * where a flash write would stall the pointer and the keys. */
+void iqs9151_setting_ripple_measured(char axis, uint16_t period_x10);
+
 #else
 
 static inline bool iqs9151_setting_one_hand_pinch(void) {
@@ -170,6 +175,11 @@ static inline void iqs9151_setting_ripple_found(char axis, uint16_t period_x10) 
 static inline void iqs9151_setting_map_learned(char axis, uint16_t bins) {
     ARG_UNUSED(axis);
     ARG_UNUSED(bins);
+}
+
+static inline void iqs9151_setting_ripple_measured(char axis, uint16_t period_x10) {
+    ARG_UNUSED(axis);
+    ARG_UNUSED(period_x10);
 }
 
 #endif /* CONFIG_INPUT_IQS9151_RUNTIME_SETTINGS */

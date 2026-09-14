@@ -581,7 +581,9 @@ struct iqs9151_ripple_map {
     uint16_t learned;                /* bins with enough samples, as last published */
     uint16_t period_geo_x10;  /* the wave's period from the geometry, the window until measured */
     uint16_t period_x10;      /* the wave's period as measured from the table; 0 = not yet */
+    uint16_t period_cand_x10; /* the previous measurement, which the next must agree with */
     uint16_t period_told_x10; /* ... as last published to the app */
+    int64_t published_ms;     /* when the learned count was last published */
 };
 
 struct iqs9151_data {
@@ -3808,6 +3810,7 @@ static void iqs9151_map_clear(struct iqs9151_ripple_map *map, uint16_t resolutio
     map->dirty = false;
     map->steps_since_save = 0;
     map->period_x10 = 0;
+    map->period_cand_x10 = 0;
 }
 
 /* Start from what was saved, if it was learned at this resolution. */
@@ -3999,16 +4002,25 @@ static void iqs9151_map_measure_period(struct iqs9151_ripple_map *map) {
         ((uint32_t)lag_x16 * res * 10U + 8U * IQS9151_MAP_BINS) / (16U * IQS9151_MAP_BINS);
     const uint16_t measured =
         (uint16_t)CLAMP(period_x10, IQS9151_RIPPLE_MIN_PERIOD_X10, IQS9151_RIPPLE_MAX_PERIOD_X10);
+    /* On a faint wave the best lag wanders from one rebuild to the next.
+     * Take a measurement only when it agrees with the previous one to
+     * within two counts; a wandering one changes nothing. */
+    const int32_t agree = (int32_t)measured - (int32_t)map->period_cand_x10;
+    map->period_cand_x10 = measured;
+    if (agree >= 20 || agree <= -20) {
+        return;
+    }
     const int32_t moved = (int32_t)measured - (int32_t)map->period_x10;
+    if (moved < 20 && moved > -20) {
+        return;
+    }
     map->period_x10 = measured;
     /* A new window means what was learned so far was against a reference
      * with some of the wave still in it. Keep it -- it has the right period
      * -- but let the samples taken against the right reference outweigh it
      * soon, rather than one thirty-second at a time. */
-    if (moved >= 20 || moved <= -20) {
-        for (size_t b = 0; b < IQS9151_MAP_BINS; b++) {
-            map->n[b] = MIN(map->n[b], 8U);
-        }
+    for (size_t b = 0; b < IQS9151_MAP_BINS; b++) {
+        map->n[b] = MIN(map->n[b], 8U);
     }
 }
 
@@ -4091,25 +4103,33 @@ static uint32_t iqs9151_map_l(const struct iqs9151_ripple_map *map, uint32_t pos
 }
 
 /* Returns true when a snapshot was taken and wants writing. */
+/*
+ * Nothing here may touch flash or the radio: this runs in the frame work
+ * on the system work queue, on the wireless half too, and a flash write
+ * there waits for gaps between radio events while the pointer and the keys
+ * wait behind it. The first version of the period measurement wrote the
+ * period to flash from here whenever it moved, and on a faint wave it
+ * moved often: after a few minutes of use the wireless half's pointer
+ * went heavy. What the app is told goes out as a memory-only value, and
+ * the learned count no more than every ten seconds, since each one crosses
+ * the link between the halves.
+ */
+#define IQS9151_MAP_PUBLISH_MIN_MS 10000
+
 static bool iqs9151_map_lift(struct iqs9151_ripple_map *map, char axis, int64_t now_ms) {
     memset(&map->ref, 0, sizeof(map->ref));
     map->have_prev = false;
     map->rem_fp = 0;
-    if (map->dirty) {
+    if (map->dirty && (now_ms - map->published_ms) >= IQS9151_MAP_PUBLISH_MIN_MS) {
+        map->published_ms = now_ms;
         iqs9151_map_publish(map, axis);
     }
-    /* The measured period goes where the period search puts its answer,
-     * so the app shows it; that is a flash write, so only when it has
-     * moved by a couple of counts. */
-    if (map->period_x10 != 0U) {
-        const int32_t moved = (int32_t)map->period_x10 - (int32_t)map->period_told_x10;
-        if (moved >= 20 || moved <= -20) {
-            map->period_told_x10 = map->period_x10;
-            iqs9151_ripple_remember(axis, map->period_x10);
+    if (map->period_x10 != 0U && map->period_x10 != map->period_told_x10) {
+        map->period_told_x10 = map->period_x10;
+        iqs9151_setting_ripple_measured(axis, map->period_x10);
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_MOTION_TRACE)
-            LOG_WRN("m%c period %u.%u", axis, map->period_x10 / 10U, map->period_x10 % 10U);
+        LOG_WRN("m%c period %u.%u", axis, map->period_x10 / 10U, map->period_x10 % 10U);
 #endif
-        }
     }
     return iqs9151_map_snapshot(map, axis, now_ms);
 }
