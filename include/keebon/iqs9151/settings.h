@@ -140,6 +140,12 @@
 #define IQS9151_SETTING_STATIONARY_THRESHOLD_KEY "stationary_threshold"
 #define IQS9151_SETTING_JITTER_DELTA_KEY "jitter_delta"
 
+/* Touch set / clear threshold multipliers, 1..255 (0x11CC / 0x11CD). The
+ * sensitivity of the pad, and with it how many electrodes the position is
+ * the centroid of: 44/38 is the IC's conservative default, 26/20 smooth. */
+#define IQS9151_SETTING_TOUCH_SET_THRESHOLD_KEY "touch_set_threshold"
+#define IQS9151_SETTING_TOUCH_CLEAR_THRESHOLD_KEY "touch_clear_threshold"
+
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_RUNTIME_SETTINGS)
 
 bool iqs9151_setting_one_hand_pinch(void);

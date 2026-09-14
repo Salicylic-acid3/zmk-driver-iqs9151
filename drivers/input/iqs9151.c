@@ -4883,10 +4883,21 @@ static void iqs9151_apply_requested_filter(const struct device *dev) {
         return;
     }
 
+    /* The touch thresholds, adjacent bytes; 0 means "leave the register". */
+    if (tune.touch_set != 0U && tune.touch_clear != 0U) {
+        const uint8_t thresholds[2] = {tune.touch_set, tune.touch_clear};
+        ret = iqs9151_i2c_write(cfg, IQS9151_ADDR_TOUCH_SET_THRESHOLD, thresholds,
+                                sizeof(thresholds));
+        if (ret != 0) {
+            LOG_WRN("Failed to apply touch thresholds (%d), retrying next frame", ret);
+            return;
+        }
+    }
+
     atomic_set(&data->filter_generation, generation);
-    LOG_INF("Trackpad filter: speed %u..%u, beta %u/%u, stationary %u, jitter %u",
+    LOG_INF("Trackpad filter: speed %u..%u, beta %u/%u, stationary %u, jitter %u, touch %u/%u",
             tune.bottom_speed, tune.top_speed, tune.bottom_beta, tune.static_beta,
-            tune.stationary_threshold, tune.jitter_delta);
+            tune.stationary_threshold, tune.jitter_delta, tune.touch_set, tune.touch_clear);
 }
 
 static const struct iqs9151_filter_tune iqs9151_kconfig_filter = {
@@ -4896,6 +4907,8 @@ static const struct iqs9151_filter_tune iqs9151_kconfig_filter = {
     .static_beta = CONFIG_INPUT_IQS9151_STATIC_FILTER_BETA,
     .stationary_threshold = CONFIG_INPUT_IQS9151_STATIONARY_TOUCH_MOV_THRESHOLD,
     .jitter_delta = CONFIG_INPUT_IQS9151_JITTER_FILTER_DELTA,
+    .touch_set = CONFIG_INPUT_IQS9151_TOUCH_SET_THRESHOLD,
+    .touch_clear = CONFIG_INPUT_IQS9151_TOUCH_CLEAR_THRESHOLD,
 };
 
 /*

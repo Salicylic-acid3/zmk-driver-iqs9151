@@ -163,6 +163,13 @@ struct iqs9151_filter_tune {
     uint8_t static_beta;
     uint8_t stationary_threshold;
     uint8_t jitter_delta;
+    /* Touch set / clear threshold multipliers (0x11CC / 0x11CD): how far
+     * a channel must rise above its reference to count as touched, and
+     * fall back below to be released. The position is the centroid of the
+     * touched channels, so this is also how many electrodes take part in
+     * it: lower is smoother and more sensitive, higher is the reverse. */
+    uint8_t touch_set;
+    uint8_t touch_clear;
 };
 
 /**

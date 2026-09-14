@@ -259,6 +259,12 @@ IQS9151_FILTER_SETTING(iqs9151_stationary_threshold, IQS9151_SETTING_STATIONARY_
                        CONFIG_INPUT_IQS9151_STATIONARY_TOUCH_MOV_THRESHOLD, 255);
 IQS9151_FILTER_SETTING(iqs9151_jitter_delta, IQS9151_SETTING_JITTER_DELTA_KEY,
                        CONFIG_INPUT_IQS9151_JITTER_FILTER_DELTA, 255);
+/* The touch thresholds ride in the same block: the pad's sensitivity, and
+ * how many electrodes the position is the centroid of. */
+IQS9151_FILTER_SETTING(iqs9151_touch_set_threshold, IQS9151_SETTING_TOUCH_SET_THRESHOLD_KEY,
+                       CONFIG_INPUT_IQS9151_TOUCH_SET_THRESHOLD, 255);
+IQS9151_FILTER_SETTING(iqs9151_touch_clear_threshold, IQS9151_SETTING_TOUCH_CLEAR_THRESHOLD_KEY,
+                       CONFIG_INPUT_IQS9151_TOUCH_CLEAR_THRESHOLD, 255);
 
 /*
  * Fall back to the compiled-in value on any error, rather than propagating it.
@@ -377,6 +383,12 @@ static void apply_filter(void) {
                                 CONFIG_INPUT_IQS9151_STATIONARY_TOUCH_MOV_THRESHOLD),
         .jitter_delta = (uint8_t)read_int32(IQS9151_SETTING_JITTER_DELTA_KEY,
                                             CONFIG_INPUT_IQS9151_JITTER_FILTER_DELTA),
+        .touch_set = (uint8_t)CLAMP(read_int32(IQS9151_SETTING_TOUCH_SET_THRESHOLD_KEY,
+                                               CONFIG_INPUT_IQS9151_TOUCH_SET_THRESHOLD),
+                                    1, 255),
+        .touch_clear = (uint8_t)CLAMP(read_int32(IQS9151_SETTING_TOUCH_CLEAR_THRESHOLD_KEY,
+                                                 CONFIG_INPUT_IQS9151_TOUCH_CLEAR_THRESHOLD),
+                                      1, 255),
     };
 
     (void)iqs9151_request_filter(&tune);
@@ -446,7 +458,9 @@ static int iqs9151_settings_event_listener(const zmk_event_t *eh) {
         apply_cursor_gain();
     } else if (strncmp(changed->setting->key, "filter_", 7) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_STATIONARY_THRESHOLD_KEY) == 0 ||
-               strcmp(changed->setting->key, IQS9151_SETTING_JITTER_DELTA_KEY) == 0) {
+               strcmp(changed->setting->key, IQS9151_SETTING_JITTER_DELTA_KEY) == 0 ||
+               strcmp(changed->setting->key, IQS9151_SETTING_TOUCH_SET_THRESHOLD_KEY) == 0 ||
+               strcmp(changed->setting->key, IQS9151_SETTING_TOUCH_CLEAR_THRESHOLD_KEY) == 0) {
         apply_filter();
     }
 
