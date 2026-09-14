@@ -472,10 +472,20 @@ struct iqs9151_ripple_ref {
  * running so the lock can follow a drift.
  */
 #define IQS9151_RIPPLE_SCAN_MAX 29
-#define IQS9151_RIPPLE_SCAN_COARSE_MIN_X10 700
-#define IQS9151_RIPPLE_SCAN_COARSE_STEP_X10 5
+/*
+ * The coarse sweep is centred on what the geometry predicts for the axis --
+ * resolution / (2 x electrodes along it) -- and spans +/-14 steps of a
+ * hundredth of that, so +/-14%. A fixed 70..84 was right for the long axis
+ * at its original scale and for nothing else: the short axis (10 electrodes,
+ * 1200 counts) lives at 60, and a pad whose scale has been changed moves
+ * with it. A bank that does not contain the period cannot find it, and
+ * shows it only as a peak pinned to one end.
+ */
+#define IQS9151_RIPPLE_SCAN_COARSE_HALF 14
+#define IQS9151_RIPPLE_SCAN_COARSE_PERCENT 1
+#define IQS9151_RIPPLE_MIN_PERIOD_X10 200 /* 20.0 counts: below this nothing is a wave */
 #define IQS9151_RIPPLE_SCAN_FINE_STEP_X10 1
-#define IQS9151_RIPPLE_SCAN_FINE_HALF 5        /* +/- 0.5 around the coarse winner */
+#define IQS9151_RIPPLE_SCAN_FINE_HALF 10 /* +/- 1.0 around the coarse winner */
 #define IQS9151_RIPPLE_SCAN_EVERY 256          /* learning steps per verdict */
 #define IQS9151_RIPPLE_SCAN_MIN_AMP 3277       /* 0.10 in Q15: below this, no wave */
 #define IQS9151_RIPPLE_SCAN_AGREE 2            /* consecutive verdicts before acting */
@@ -3283,19 +3293,52 @@ static void iqs9151_ripple_remember(char axis, uint16_t period_x10) {
 
 static void iqs9151_ripple_scan_fine_around(struct iqs9151_ripple_scan *scan, uint16_t centre);
 
+/*
+ * Where the geometry puts the period of an axis, in tenths: the axis
+ * resolution divided by twice the electrodes along it. Electrodes are along
+ * the Rxs for X unless the IC is told to switch the axes; the counts are the
+ * ones this driver configures.
+ */
+static uint16_t iqs9151_ripple_expected_x10(char axis, uint16_t resolution) {
+    const bool switched = (TRACKPAD_SETTINGS_0_0 & IQS9151_TRACKPAD_SETTING_SWITCH_XY) != 0U;
+    const uint32_t along_x = switched ? TRACKPAD_SETTINGS_1_0 : TRACKPAD_SETTINGS_0_1;
+    const uint32_t along_y = switched ? TRACKPAD_SETTINGS_0_1 : TRACKPAD_SETTINGS_1_0;
+    const uint32_t electrodes = (axis == 'y') ? along_y : along_x;
+    if (resolution == 0U) {
+        resolution =
+            (axis == 'y') ? CONFIG_INPUT_IQS9151_RESOLUTION_Y : CONFIG_INPUT_IQS9151_RESOLUTION_X;
+    }
+    const uint32_t x10 = (10U * resolution + electrodes) / (2U * MAX(1U, electrodes));
+    return (uint16_t)CLAMP(x10, IQS9151_RIPPLE_MIN_PERIOD_X10, IQS9151_RIPPLE_MAX_PERIOD_X10);
+}
+
+/* The coarse sweep for an axis: +/-14% around the geometric period, one
+ * percent apart, clipped to what a period can be. */
+static void iqs9151_ripple_scan_coarse(struct iqs9151_ripple_scan *scan, char axis) {
+    const uint16_t centre = iqs9151_ripple_expected_x10(axis, scan->resolution);
+    const uint16_t step = MAX(1U, (centre * IQS9151_RIPPLE_SCAN_COARSE_PERCENT + 50U) / 100U);
+    uint16_t base = (centre > IQS9151_RIPPLE_SCAN_COARSE_HALF * step)
+                        ? centre - IQS9151_RIPPLE_SCAN_COARSE_HALF * step
+                        : 0U;
+    base = MAX(base, IQS9151_RIPPLE_MIN_PERIOD_X10);
+    uint8_t count = IQS9151_RIPPLE_SCAN_MAX;
+    while (count > 1U && base + (count - 1U) * step > IQS9151_RIPPLE_MAX_PERIOD_X10) {
+        count--;
+    }
+    iqs9151_ripple_scan_start(scan, IQS9151_RIPPLE_SCAN_COARSE, base, step, count);
+}
+
 /* Start over: from what was remembered if there is something, else the
  * coarse sweep. */
 static void iqs9151_ripple_scan_reset(struct iqs9151_ripple_scan *scan, char axis) {
     const uint16_t remembered = iqs9151_ripple_remembered[(axis == 'y') ? 1 : 0];
-    if (remembered >= IQS9151_RIPPLE_SCAN_COARSE_MIN_X10 + IQS9151_RIPPLE_SCAN_FINE_HALF &&
+    if (remembered >= IQS9151_RIPPLE_MIN_PERIOD_X10 + IQS9151_RIPPLE_SCAN_FINE_HALF &&
         remembered + IQS9151_RIPPLE_SCAN_FINE_HALF <= IQS9151_RIPPLE_MAX_PERIOD_X10) {
         iqs9151_ripple_scan_fine_around(scan, remembered);
         scan->found_x10 = remembered;
         return;
     }
-    iqs9151_ripple_scan_start(scan, IQS9151_RIPPLE_SCAN_COARSE,
-                              IQS9151_RIPPLE_SCAN_COARSE_MIN_X10,
-                              IQS9151_RIPPLE_SCAN_COARSE_STEP_X10, IQS9151_RIPPLE_SCAN_MAX);
+    iqs9151_ripple_scan_coarse(scan, axis);
     scan->found_x10 = 0;
 }
 
@@ -3506,7 +3549,7 @@ static uint16_t iqs9151_ripple_scan_peak(const struct iqs9151_ripple_scan *scan,
     /* offset in candidate steps, scaled by 16 for the rounding below */
     const int64_t off16 = ((lo - hi) * 16 * (int64_t)reach) / denom;
     const int32_t off_x10 = (int32_t)((off16 * scan->step_x10 + (off16 < 0 ? -8 : 8)) / 16);
-    return (uint16_t)CLAMP((int32_t)at + off_x10, IQS9151_RIPPLE_SCAN_COARSE_MIN_X10,
+    return (uint16_t)CLAMP((int32_t)at + off_x10, IQS9151_RIPPLE_MIN_PERIOD_X10,
                            IQS9151_RIPPLE_MAX_PERIOD_X10);
 }
 
@@ -3553,9 +3596,13 @@ static uint16_t iqs9151_ripple_scan_verdict(struct iqs9151_ripple_scan *scan, ch
         iqs9151_ripple_scan_peak(scan, amp, best, coarse ? 1U : IQS9151_RIPPLE_SCAN_FINE_HALF);
 
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_MOTION_TRACE)
-    LOG_WRN("eqscan %c %s peak %u.%u amp %d pack %d", axis, coarse ? "coarse" : "fine",
-            estimate / 10U, estimate % 10U, iqs9151_ripple_milli((int32_t)amp[best]),
-            iqs9151_ripple_milli((int32_t)pack));
+    {
+        const uint16_t top = scan->base_x10 + (scan->count - 1U) * scan->step_x10;
+        LOG_WRN("eqscan %c %s %u.%u-%u.%u peak %u.%u amp %d pack %d", axis,
+                coarse ? "coarse" : "fine", scan->base_x10 / 10U, scan->base_x10 % 10U,
+                top / 10U, top % 10U, estimate / 10U, estimate % 10U,
+                iqs9151_ripple_milli((int32_t)amp[best]), iqs9151_ripple_milli((int32_t)pack));
+    }
 #else
     ARG_UNUSED(axis);
 #endif
@@ -3572,10 +3619,7 @@ static uint16_t iqs9151_ripple_scan_verdict(struct iqs9151_ripple_scan *scan, ch
          * turns up. */
         if (!coarse && ++scan->lost >= IQS9151_RIPPLE_SCAN_LOST) {
             const uint16_t found = scan->found_x10;
-            iqs9151_ripple_scan_start(scan, IQS9151_RIPPLE_SCAN_COARSE,
-                                      IQS9151_RIPPLE_SCAN_COARSE_MIN_X10,
-                                      IQS9151_RIPPLE_SCAN_COARSE_STEP_X10,
-                                      IQS9151_RIPPLE_SCAN_MAX);
+            iqs9151_ripple_scan_coarse(scan, axis);
             scan->found_x10 = found;
         }
         return 0;
@@ -3631,8 +3675,8 @@ static int16_t iqs9151_ripple_apply(struct iqs9151_ripple_eq *eq, char axis, uin
         (axis == 'y') ? &iqs9151_requested_resolution_y : &iqs9151_requested_resolution_x);
     if (scanning != eq->scanning) {
         eq->scanning = scanning;
-        iqs9151_ripple_scan_reset(&eq->scan, axis);
         eq->scan.resolution = resolution;
+        iqs9151_ripple_scan_reset(&eq->scan, axis);
     } else if (scanning && eq->scan.resolution != resolution) {
         /* The period is in the device's absolute units, so a new resolution
          * is a new period: forget the old one and sweep. Zero is not a
