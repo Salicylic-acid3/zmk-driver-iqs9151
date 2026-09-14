@@ -681,6 +681,11 @@ struct iqs9151_data {
     struct iqs9151_ripple_map map_x;
     struct iqs9151_ripple_map map_y;
     struct k_work map_save_work;     /* flash, off the system work queue */
+    /* The landing dead zone: where the finger came down, when, and whether
+     * its movement is still being withheld. */
+    uint16_t land_x, land_y;
+    int64_t land_ms;
+    bool landing;
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_MOTION_TRACE)
     int64_t trace_last_read_ms;
     uint16_t trace_quiet;
@@ -2978,6 +2983,9 @@ static void iqs9151_report_frame_events(struct iqs9151_data *data,
     }
 }
 
+static bool iqs9151_in_landing_zone(struct iqs9151_data *data, const struct iqs9151_frame *frame,
+                                    const struct iqs9151_frame *prev_frame, int64_t now_ms);
+
 static void iqs9151_process_frame(struct iqs9151_data *data,
                                   const struct iqs9151_frame *frame,
                                   int64_t now_ms) {
@@ -3003,10 +3011,10 @@ static void iqs9151_process_frame(struct iqs9151_data *data,
      * carry a zero delta (a direction reversal within the frame) still counts.
      * Every consumer of this flag is already guarded by finger_count == 1.
      */
-    const bool cursor_moving =
-        (frame->finger_count == 1U) &&
-        (((frame->trackpad_flags & IQS9151_TP_MOVEMENT_DETECTED) != 0U) ||
-         frame->rel_x != 0 || frame->rel_y != 0);
+    const bool cursor_moving = (frame->finger_count == 1U) &&
+                               (((frame->trackpad_flags & IQS9151_TP_MOVEMENT_DETECTED) != 0U) ||
+                                frame->rel_x != 0 || frame->rel_y != 0) &&
+                               !iqs9151_in_landing_zone(data, frame, &prev_frame, now_ms);
     bool released_from_hold;
     bool suppress_cursor_tail;
 
@@ -3092,6 +3100,50 @@ static atomic_t iqs9151_cursor_gain_y_x10 =
 
 static atomic_t iqs9151_cursor_smoothing =
     ATOMIC_INIT(CONFIG_INPUT_IQS9151_CURSOR_SMOOTHING);
+
+static atomic_t iqs9151_tap_dead_zone = ATOMIC_INIT(CONFIG_INPUT_IQS9151_TAP_DEAD_ZONE);
+
+int iqs9151_set_tap_dead_zone(uint16_t counts) {
+    atomic_set(&iqs9151_tap_dead_zone, (atomic_val_t)counts);
+    return 0;
+}
+
+/*
+ * A finger landing does not stay put. As the fingertip flattens over the
+ * first few frames the centroid the device reports slides toward the
+ * finger's base -- a millimetre or so, toward the palm, which on this pad
+ * is "down" on the screen -- and lifting slides it back. A tap meant as a
+ * click therefore dragged the pointer a little every time. Withhold
+ * movement while the finger is still near where it landed and the landing
+ * is recent: a tap never leaves that zone, a stroke leaves it in a frame or
+ * two and loses only its first fraction of a millimetre, and a finger that
+ * rests there past the time limit is not tapping and gets its movement
+ * back. The withheld frames are dropped, not replayed: replaying them
+ * would put the drift back.
+ */
+static bool iqs9151_in_landing_zone(struct iqs9151_data *data, const struct iqs9151_frame *frame,
+                                    const struct iqs9151_frame *prev_frame, int64_t now_ms) {
+    const uint16_t zone = (uint16_t)atomic_get(&iqs9151_tap_dead_zone);
+    if (prev_frame->finger_count == 0U && frame->finger_count == 1U) {
+        data->landing = zone != 0U;
+        data->land_x = frame->finger1_x;
+        data->land_y = frame->finger1_y;
+        data->land_ms = now_ms;
+    }
+    if (!data->landing || frame->finger_count != 1U) {
+        data->landing = data->landing && frame->finger_count == 1U;
+        return false;
+    }
+    const int32_t dx = (int32_t)frame->finger1_x - (int32_t)data->land_x;
+    const int32_t dy = (int32_t)frame->finger1_y - (int32_t)data->land_y;
+    const int32_t away = MAX(dx < 0 ? -dx : dx, dy < 0 ? -dy : dy);
+    if (away >= (int32_t)zone ||
+        (now_ms - data->land_ms) >= CONFIG_INPUT_IQS9151_TAP_DEAD_ZONE_MS) {
+        data->landing = false;
+        return false;
+    }
+    return true;
+}
 
 int iqs9151_set_cursor_smoothing(uint16_t reports) {
     atomic_set(&iqs9151_cursor_smoothing, (atomic_val_t)MAX(1U, reports));

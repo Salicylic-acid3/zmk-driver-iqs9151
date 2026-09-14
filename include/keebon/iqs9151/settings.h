@@ -81,6 +81,8 @@
  * INPUT_IQS9151_CURSOR_SMOOTHING -- it is the companion to the gains, because
  * amplifying a quantised axis is what makes it step. */
 #define IQS9151_SETTING_CURSOR_SMOOTHING_KEY "cursor_smoothing"
+/* Pointer movement withheld after a finger lands, in counts (0 = none). */
+#define IQS9151_SETTING_TAP_DEAD_ZONE_KEY "tap_dead_zone"
 
 /* Counts of finger travel to average the pointer over; 0 is off. A window in
  * distance rather than reports, so it flattens a ripple fixed in millimetres at

@@ -84,6 +84,13 @@ uint16_t iqs9151_cursor_gain_x10(char axis);
 int iqs9151_set_cursor_smoothing(uint16_t reports);
 
 /**
+ * Withhold pointer movement while a landed finger is within this many counts
+ * of where it landed (and the landing is recent), so a tap does not drag
+ * the pointer with the drift of a flattening fingertip. 0 withholds nothing.
+ */
+int iqs9151_set_tap_dead_zone(uint16_t counts);
+
+/**
  * Average the pointer over this many counts of finger travel; 0 turns it off.
  *
  * Unlike the report smoothing above, this window is measured in distance, so it

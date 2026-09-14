@@ -147,6 +147,28 @@ config INPUT_IQS9151_CURSOR_REPORT_INTERVAL_MS
       does on the USB half. Leave it 0 on the half that talks to the host
       directly. Also a runtime setting.
 
+config INPUT_IQS9151_TAP_DEAD_ZONE
+    int "IQS9151 pointer movement withheld after a finger lands, in counts"
+    range 0 200
+    default 20
+    help
+      A finger landing does not stay put as it flattens: the centroid the
+      device reports drifts toward the finger's base by a millimetre or so,
+      and a tap that was meant to click moved the pointer instead. Movement
+      is withheld while the finger is within this many counts of where it
+      landed and less than INPUT_IQS9151_TAP_DEAD_ZONE_MS has passed; a
+      deliberate stroke leaves the zone in a frame or two and loses only
+      its first fraction of a millimetre. 0 withholds nothing. Also the
+      runtime setting tap_dead_zone.
+
+config INPUT_IQS9151_TAP_DEAD_ZONE_MS
+    int "IQS9151 how long the dead zone lasts after landing, in milliseconds"
+    range 0 1000
+    default 150
+    help
+      A finger still inside the zone this long after landing is resting,
+      not tapping, and its movement goes through from then on.
+
 config INPUT_IQS9151_CURSOR_SMOOTHING
     int "IQS9151 spread each report's pointer movement over this many reports"
     range 1 8
