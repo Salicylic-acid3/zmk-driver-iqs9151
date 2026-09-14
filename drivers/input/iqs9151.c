@@ -562,7 +562,12 @@ struct iqs9151_ripple_eq {
 struct iqs9151_ripple_map {
     int16_t g[IQS9151_MAP_BINS];     /* learned speed ratio, Q12; 0 = never visited */
     uint8_t n[IQS9151_MAP_BINS];     /* samples seen, saturating */
-    uint16_t corr[IQS9151_MAP_BINS]; /* Q8 correction: mean(g) / g, smoothed; 256 = none */
+    uint16_t corr[IQS9151_MAP_BINS]; /* Q8 local slope of the correction: mean(g) / g; 256 = none */
+    /* L: the corrected absolute position at each bin edge, in 1/256 bin, the
+     * running sum of corr. The report is L(abs now) - L(abs before): the
+     * true distance the finger moved, whatever the reported one was. */
+    uint32_t lut[IQS9151_MAP_BINS + 1];
+    int32_t prev_l;                  /* L at the previous frame's position */
     struct iqs9151_ripple_ref ref;   /* local reference: one electrode pitch of travel */
     uint16_t resolution;             /* the axis resolution the table is for */
     uint16_t prev_abs;               /* where the finger was last frame */
@@ -3774,12 +3779,16 @@ SETTINGS_STATIC_HANDLER_DEFINE(iqs9151_map, "iqs9151/map", NULL, iqs9151_map_set
 
 static void iqs9151_map_rebuild(struct iqs9151_ripple_map *map);
 static void iqs9151_map_publish(struct iqs9151_ripple_map *map, char axis);
+static uint32_t iqs9151_map_l(const struct iqs9151_ripple_map *map, uint32_t pos);
 
 static void iqs9151_map_clear(struct iqs9151_ripple_map *map, uint16_t resolution) {
     memset(map->g, 0, sizeof(map->g));
     memset(map->n, 0, sizeof(map->n));
     for (size_t i = 0; i < IQS9151_MAP_BINS; i++) {
         map->corr[i] = 256;
+    }
+    for (size_t i = 0; i <= IQS9151_MAP_BINS; i++) {
+        map->lut[i] = (uint32_t)i * 256U;
     }
     memset(&map->ref, 0, sizeof(map->ref));
     map->resolution = resolution;
@@ -3879,25 +3888,50 @@ static void iqs9151_map_publish(struct iqs9151_ripple_map *map, char axis) {
  * doubles). The per-bin average does the smoothing, over samples.
  */
 static void iqs9151_map_rebuild(struct iqs9151_ripple_map *map) {
-    uint32_t sum = 0, cnt = 0;
+    /*
+     * The slope is 1/g, normalised so that its mean over the bins -- which
+     * are equal widths of *reported* position -- is one: then a stroke's
+     * corrected length equals its reported length and only the pace inside
+     * it changes. Normalising by mean(g) instead is off by mean(g) x
+     * mean(1/g), a tenth on a wave this deep.
+     */
+    uint32_t inv[IQS9151_MAP_BINS]; /* 1/g in Q12 */
+    uint64_t sum = 0;
+    uint32_t cnt = 0;
     for (size_t b = 0; b < IQS9151_MAP_BINS; b++) {
         if (map->n[b] >= IQS9151_MAP_MIN_SAMPLES && map->g[b] > 0) {
-            sum += (uint32_t)map->g[b];
+            inv[b] = ((uint32_t)IQS9151_MAP_ONE * IQS9151_MAP_ONE + (uint32_t)map->g[b] / 2U) /
+                     (uint32_t)map->g[b];
+            sum += inv[b];
             cnt++;
+        } else {
+            inv[b] = 0;
         }
     }
     if (cnt == 0U) {
         return;
     }
-    const uint32_t mean = sum / cnt;
+    const uint32_t mean_inv = (uint32_t)(sum / cnt);
     for (size_t b = 0; b < IQS9151_MAP_BINS; b++) {
-        if (map->n[b] >= IQS9151_MAP_MIN_SAMPLES && map->g[b] > 0) {
-            map->corr[b] =
-                (uint16_t)CLAMP((mean * 256U + (uint32_t)map->g[b] / 2U) / (uint32_t)map->g[b],
-                                IQS9151_MAP_CORR_MIN, IQS9151_MAP_CORR_MAX);
+        if (inv[b] != 0U) {
+            map->corr[b] = (uint16_t)CLAMP((inv[b] * 256U + mean_inv / 2U) / mean_inv,
+                                           IQS9151_MAP_CORR_MIN, IQS9151_MAP_CORR_MAX);
         } else {
             map->corr[b] = 256;
         }
+    }
+    /* L at every bin edge: the slopes summed from the left edge of the pad.
+     * The report is a difference of two of these, so where the sum starts
+     * does not matter; that it is one table for both ends of the movement
+     * does -- the same frame can then never be counted twice or not at all. */
+    map->lut[0] = 0;
+    for (size_t b = 0; b < IQS9151_MAP_BINS; b++) {
+        map->lut[b + 1] = map->lut[b] + map->corr[b];
+    }
+    /* prev_l is against the old table; re-anchor it so the rebuild itself
+     * does not move the pointer. */
+    if (map->have_prev) {
+        map->prev_l = (int32_t)iqs9151_map_l(map, map->prev_abs);
     }
 }
 
@@ -3913,21 +3947,19 @@ static uint32_t iqs9151_map_bin(const struct iqs9151_ripple_map *map, uint32_t p
  * leave a fifth of the ripple behind; read as a line through the bin
  * centres it leaves a few percent.
  */
-static uint32_t iqs9151_map_corr_at(const struct iqs9151_ripple_map *map, uint32_t pos) {
+/*
+ * The corrected absolute position, L(pos), in 1/256 bin: the position the
+ * finger is really at, given where the pad says it is. Piecewise linear
+ * between the bin edges of lut[], whose slope in each bin is that bin's
+ * corr. Where nothing has been learned the slope is one and L is the
+ * identity.
+ */
+static uint32_t iqs9151_map_l(const struct iqs9151_ripple_map *map, uint32_t pos) {
     const uint32_t res = MAX(1U, (uint32_t)map->resolution);
-    /* position in 1/256 bins */
     const uint32_t q = MIN((IQS9151_MAP_BINS << 8) - 1U, (pos * (IQS9151_MAP_BINS << 8)) / res);
     const uint32_t b = q >> 8;
-    const uint32_t frac = q & 0xFFU; /* 128 = the centre of bin b */
-    uint32_t other, w;                 /* the neighbour to lean on, and how much (0..256) */
-    if (frac >= 128U) {
-        other = (b + 1U < IQS9151_MAP_BINS) ? b + 1U : b;
-        w = frac - 128U;
-    } else {
-        other = (b > 0U) ? b - 1U : b;
-        w = 128U - frac;
-    }
-    return ((256U - w) * map->corr[b] + w * map->corr[other] + 128U) >> 8;
+    const uint32_t frac = q & 0xFFU;
+    return map->lut[b] + ((uint32_t)map->corr[b] * frac + 128U) / 256U;
 }
 
 /* Returns true when a snapshot was taken and wants writing. */
@@ -3954,10 +3986,13 @@ static int16_t iqs9151_map_apply(struct iqs9151_ripple_map *map, char axis, uint
     }
 
     /* The movement in this report happened between last frame's position
-     * and this one's; it belongs to the bin in the middle. */
+     * and this one's; what it teaches belongs to the bin in the middle. */
     const uint32_t mid = map->have_prev ? ((uint32_t)map->prev_abs + abs_pos) / 2U : abs_pos;
     const bool had_prev = map->have_prev;
+    const int32_t l_now = (int32_t)iqs9151_map_l(map, abs_pos);
+    const int32_t l_before = had_prev ? map->prev_l : l_now;
     map->prev_abs = abs_pos;
+    map->prev_l = l_now;
     map->have_prev = true;
     const uint32_t bin = iqs9151_map_bin(map, mid);
 
@@ -4018,8 +4053,24 @@ static int16_t iqs9151_map_apply(struct iqs9151_ripple_map *map, char axis, uint
 #endif
     }
 
-    /* Divide the ripple out of this report, carrying the fraction. */
-    map->rem_fp += (int32_t)value * (int32_t)iqs9151_map_corr_at(map, mid);
+    /*
+     * The report: how far the finger really moved, L(now) - L(before), in
+     * counts. L is in 1/256 bin, so scale by the bin width; the fraction is
+     * carried. The pad's own relative value is not used here at all -- it
+     * is the difference of the two reported positions (checked against the
+     * frame trace: rel equals the change in abs, frame for frame), and this
+     * is the same difference taken after the correction.
+     *
+     * Before the first frame of a stroke there is no "before", and the pad's
+     * value is passed through: the finger has landed, not moved.
+     */
+    if (!had_prev) {
+        return value;
+    }
+    const int64_t moved_q8 =
+        ((int64_t)(l_now - l_before) * (int64_t)map->resolution + IQS9151_MAP_BINS / 2) /
+        IQS9151_MAP_BINS; /* counts, Q8 */
+    map->rem_fp += (int32_t)moved_q8;
     int32_t out = map->rem_fp / 256; /* toward zero; the carry keeps its sign */
     map->rem_fp -= out * 256;
     return (int16_t)CLAMP(out, INT16_MIN, INT16_MAX);
