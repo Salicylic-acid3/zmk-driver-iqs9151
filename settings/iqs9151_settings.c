@@ -37,6 +37,7 @@
 
 #include <zmk/endpoints.h>
 #include <zmk/event_manager.h>
+#include <zmk/keymap.h>
 
 #include <cormoran/zmk/custom_settings.h>
 
@@ -62,6 +63,15 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
     iqs9151_pinch_invert, IQS9151_SETTINGS_SUBSYSTEM_ID, IQS9151_SETTING_PINCH_INVERT_KEY,
     ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL,
     ZMK_CUSTOM_SETTING_VALUE_BOOL(IS_ENABLED(CONFIG_INPUT_IQS9151_2F_PINCH_INVERT)),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+/* Layers the two-finger horizontal swipe is recognised on, a bit per layer
+ * id; -1 (every bit) is the built-in behaviour. Elsewhere a sideways
+ * two-finger movement is a horizontal scroll. */
+ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
+    iqs9151_swipe2_layers, IQS9151_SETTINGS_SUBSYSTEM_ID, IQS9151_SETTING_SWIPE2_LAYERS_KEY,
+    ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, ZMK_CUSTOM_SETTING_VALUE_INT32(-1),
     ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
     ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
@@ -325,6 +335,36 @@ bool iqs9151_setting_one_hand_pinch(void) {
                      IS_ENABLED(CONFIG_INPUT_IQS9151_2F_PINCH_ENABLE));
 }
 
+/*
+ * Cached, because the driver asks on every two-finger frame and a settings
+ * lookup by key is not free. The listener below refreshes it on a change.
+ */
+static atomic_t iqs9151_swipe2_layers_mask = ATOMIC_INIT(-1);
+
+static void apply_swipe2_layers(void) {
+    atomic_set(&iqs9151_swipe2_layers_mask,
+               (atomic_val_t)read_int32(IQS9151_SETTING_SWIPE2_LAYERS_KEY, -1));
+}
+
+bool iqs9151_setting_swipe2_allowed(void) {
+    const uint32_t mask = (uint32_t)atomic_get(&iqs9151_swipe2_layers_mask);
+
+    if (mask == UINT32_MAX) {
+        return true;
+    }
+#if !IS_ENABLED(CONFIG_ZMK_SPLIT) || IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+    for (uint8_t layer = 0; layer < ZMK_KEYMAP_LAYERS_LEN && layer < 32U; layer++) {
+        if ((mask & BIT(layer)) != 0U && zmk_keymap_layer_active(layer)) {
+            return true;
+        }
+    }
+    return false;
+#else
+    /* A peripheral has no keymap and cannot tell which layer is active. */
+    return true;
+#endif
+}
+
 bool iqs9151_setting_pinch_invert(void) {
     return read_bool(IQS9151_SETTING_PINCH_INVERT_KEY,
                      IS_ENABLED(CONFIG_INPUT_IQS9151_2F_PINCH_INVERT));
@@ -467,6 +507,7 @@ static void apply_resolution(void) {
  */
 static int iqs9151_settings_event_listener(const zmk_event_t *eh) {
     if (as_zmk_custom_settings_initialized(eh) != NULL) {
+        apply_swipe2_layers();
         apply_resolution();
         apply_cursor_gain();
         apply_filter();
@@ -483,8 +524,10 @@ static int iqs9151_settings_event_listener(const zmk_event_t *eh) {
         return ZMK_EV_EVENT_BUBBLE;
     }
 
-    if (strcmp(changed->setting->key, IQS9151_SETTING_RESOLUTION_X_KEY) == 0 ||
-        strcmp(changed->setting->key, IQS9151_SETTING_RESOLUTION_Y_KEY) == 0) {
+    if (strcmp(changed->setting->key, IQS9151_SETTING_SWIPE2_LAYERS_KEY) == 0) {
+        apply_swipe2_layers();
+    } else if (strcmp(changed->setting->key, IQS9151_SETTING_RESOLUTION_X_KEY) == 0 ||
+               strcmp(changed->setting->key, IQS9151_SETTING_RESOLUTION_Y_KEY) == 0) {
         apply_resolution();
     } else if (strcmp(changed->setting->key, IQS9151_SETTING_CURSOR_GAIN_X_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_CURSOR_GAIN_Y_KEY) == 0 ||

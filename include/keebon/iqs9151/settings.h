@@ -44,6 +44,12 @@
 
 /** Two fingers on one pad pinch to zoom. */
 #define IQS9151_SETTING_ONE_HAND_PINCH_KEY "one_hand_pinch"
+/* Which keymap layers the two-finger horizontal swipe is recognised on, one
+ * bit per layer id; -1 is every layer. On a layer without its bit a sideways
+ * two-finger movement scrolls horizontally instead. Only the half with the
+ * keymap (the central) can tell which layer is active; a peripheral always
+ * recognises the swipe. */
+#define IQS9151_SETTING_SWIPE2_LAYERS_KEY "swipe2_layers"
 
 /** That pinch turns the wheel the other way. */
 #define IQS9151_SETTING_PINCH_INVERT_KEY "pinch_invert"
@@ -158,6 +164,9 @@
 
 bool iqs9151_setting_one_hand_pinch(void);
 bool iqs9151_setting_pinch_invert(void);
+/* Whether the two-finger horizontal swipe is recognised right now (see
+ * IQS9151_SETTING_SWIPE2_LAYERS_KEY). Called from the frame work; cheap. */
+bool iqs9151_setting_swipe2_allowed(void);
 
 /* The driver reporting what its period search concluded ('x' or 'y'; 0 for
  * nothing, or forgotten). Published as the ripple_found_* settings above. */
@@ -186,6 +195,8 @@ static inline bool iqs9151_setting_one_hand_pinch(void) {
 static inline bool iqs9151_setting_pinch_invert(void) {
     return IS_ENABLED(CONFIG_INPUT_IQS9151_2F_PINCH_INVERT);
 }
+
+static inline bool iqs9151_setting_swipe2_allowed(void) { return true; }
 
 static inline void iqs9151_setting_ripple_found(char axis, uint16_t period_x10) {
     ARG_UNUSED(axis);

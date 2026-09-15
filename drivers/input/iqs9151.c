@@ -1824,8 +1824,8 @@ static void iqs9151_two_finger_update(struct iqs9151_data *data,
              */
             const bool sideways =
                 IS_ENABLED(CONFIG_INPUT_IQS9151_2F_SWIPE_ENABLE) &&
-                ((int64_t)abs_dy * 10 >
-                 (int64_t)abs_dx * TWO_FINGER_SWIPE_DOMINANCE_X10);
+                iqs9151_setting_swipe2_allowed() &&
+                ((int64_t)abs_dy * 10 > (int64_t)abs_dx * TWO_FINGER_SWIPE_DOMINANCE_X10);
 
             if (sideways && abs_dy >= TWO_FINGER_SWIPE_THRESHOLD) {
                 const int32_t swipe = IQS9151_SWIPE_SIGN_Y * state->centroid_dy;
