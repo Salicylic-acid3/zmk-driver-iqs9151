@@ -41,6 +41,16 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define DRAG_CLICK_MAX_PADS 4
 #define DRAG_CLICK_NO_LAYER -1
 
+/* A split peripheral has no keymap (ZMK does not build keymap.c there), so the
+ * layer calls only exist on the central or a non-split board. The behavior is
+ * still instantiated on the peripheral because the keymap's node exists on
+ * both halves, but it is never invoked there. */
+#if !IS_ENABLED(CONFIG_ZMK_SPLIT) || IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+#define DRAG_CLICK_HAS_KEYMAP 1
+#else
+#define DRAG_CLICK_HAS_KEYMAP 0
+#endif
+
 struct drag_click_config {
     uint8_t button;
     int8_t layer;
@@ -107,19 +117,31 @@ INPUT_CALLBACK_DEFINE(NULL, drag_click_input_cb, NULL);
 
 /* --- button and layer --- */
 
+static void drag_click_layer(const struct drag_click_config *cfg, bool active) {
+#if DRAG_CLICK_HAS_KEYMAP
+    if (cfg->layer == DRAG_CLICK_NO_LAYER) {
+        return;
+    }
+    if (active) {
+        zmk_keymap_layer_activate(cfg->layer, false);
+    } else {
+        zmk_keymap_layer_deactivate(cfg->layer, false);
+    }
+#else
+    ARG_UNUSED(cfg);
+    ARG_UNUSED(active);
+#endif
+}
+
 static void drag_click_apply(const struct device *dev, bool pressed) {
     const struct drag_click_config *cfg = dev->config;
 
     if (pressed) {
-        if (cfg->layer != DRAG_CLICK_NO_LAYER) {
-            zmk_keymap_layer_activate(cfg->layer, false);
-        }
+        drag_click_layer(cfg, true);
         input_report_key(dev, INPUT_BTN_0 + cfg->button, 1, true, K_FOREVER);
     } else {
         input_report_key(dev, INPUT_BTN_0 + cfg->button, 0, true, K_FOREVER);
-        if (cfg->layer != DRAG_CLICK_NO_LAYER) {
-            zmk_keymap_layer_deactivate(cfg->layer, false);
-        }
+        drag_click_layer(cfg, false);
     }
 }
 
