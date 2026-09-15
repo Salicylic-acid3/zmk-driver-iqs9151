@@ -19,6 +19,10 @@
 #include <keebon/iqs9151/control.h>
 #include <keebon/iqs9151/settings.h>
 
+#if defined(CONFIG_INPUT_IQS9151_HOST_BACKLOG_HOLD) && CONFIG_INPUT_IQS9151_HOST_BACKLOG_HOLD > 0
+#define IQS9151_HOST_BACKLOG_HOLD CONFIG_INPUT_IQS9151_HOST_BACKLOG_HOLD
+#endif
+
 #include "iqs9151_init.h"
 #include "iqs9151_regs.h"
 #include "iqs9151_test.h"
@@ -2903,6 +2907,42 @@ int iqs9151_set_cursor_report_interval(uint16_t ms) {
  * immediately when the frame is anything but a cursor frame. 0 reports every
  * frame, which is right for the half on USB.
  */
+#ifdef IQS9151_HOST_BACKLOG_HOLD
+/*
+ * ZMK's HID-over-GATT sender (hog.c) keeps mouse reports in a message queue
+ * and blocks on radio buffers while it drains it. A host that takes reports
+ * slower than the pad makes them lets that queue fill (20 deep by default),
+ * and then the pointer is replaying the past: the lag grows for as long as
+ * the finger keeps moving and only catches up once it stops. Windows over
+ * BLE did this at 200 Hz; macOS drained fast enough not to.
+ *
+ * So while reports are still waiting there, the movement stays owed and
+ * rides on a later frame instead. The queue never grows past the threshold,
+ * nothing is dropped, and a host that keeps up never sees a difference. The
+ * queue depth comes through the settings layer (compiled into app), since
+ * this library stays free of ZMK headers; it reports 0 on USB and on the
+ * peripheral half.
+ */
+static bool iqs9151_host_link_backlogged(int64_t now_ms) {
+    static int64_t last_warn_ms;
+
+    const uint32_t waiting = iqs9151_setting_host_mouse_backlog();
+    if (waiting < IQS9151_HOST_BACKLOG_HOLD) {
+        return false;
+    }
+    if (now_ms - last_warn_ms >= 2000) {
+        last_warn_ms = now_ms;
+        LOG_WRN("host link backlog %u, holding movement", waiting);
+    }
+    return true;
+}
+#else
+static inline bool iqs9151_host_link_backlogged(int64_t now_ms) {
+    ARG_UNUSED(now_ms);
+    return false;
+}
+#endif
+
 static void iqs9151_report_cursor(struct iqs9151_data *data, int32_t dx, int32_t dy,
                                   int64_t now_ms, bool flush) {
     const struct device *dev = data->dev;
@@ -2914,6 +2954,9 @@ static void iqs9151_report_cursor(struct iqs9151_data *data, int32_t dx, int32_t
         return;
     }
     if (!flush && interval > 0 && (now_ms - data->cursor_report_ms) < interval) {
+        return;
+    }
+    if (!flush && iqs9151_host_link_backlogged(now_ms)) {
         return;
     }
 

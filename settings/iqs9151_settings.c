@@ -35,6 +35,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 
+#include <zmk/endpoints.h>
 #include <zmk/event_manager.h>
 
 #include <cormoran/zmk/custom_settings.h>
@@ -229,6 +230,21 @@ void iqs9151_setting_ripple_measured(char axis, uint16_t period_x10) {
         (axis == 'y') ? &iqs9151_ripple_found_y : &iqs9151_ripple_found_x;
     (void)zmk_custom_setting_set_int32(setting, period_x10, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
 }
+
+#if IS_ENABLED(CONFIG_ZMK_BLE) && IS_ENABLED(CONFIG_ZMK_POINTING) &&                               \
+    (!IS_ENABLED(CONFIG_ZMK_SPLIT) || IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL))
+/* ZMK's HID-over-GATT mouse queue (hog.c, not static). */
+extern struct k_msgq zmk_hog_mouse_msgq;
+
+uint32_t iqs9151_setting_host_mouse_backlog(void) {
+    if (zmk_endpoint_get_selected().transport != ZMK_TRANSPORT_BLE) {
+        return 0;
+    }
+    return k_msgq_num_used_get(&zmk_hog_mouse_msgq);
+}
+#else
+uint32_t iqs9151_setting_host_mouse_backlog(void) { return 0; }
+#endif
 
 void iqs9151_setting_ripple_found(char axis, uint16_t period_x10) {
     const struct zmk_custom_setting *setting =

@@ -168,6 +168,12 @@ void iqs9151_setting_map_learned(char axis, uint16_t bins);
  * where a flash write would stall the pointer and the keys. */
 void iqs9151_setting_ripple_measured(char axis, uint16_t period_x10);
 
+/* How many mouse reports are still waiting to go out to the host over BLE
+ * (ZMK's HID-over-GATT queue), or 0 when the selected endpoint is not BLE or
+ * this half does not talk to a host. The driver holds movement while this is
+ * at or above CONFIG_INPUT_IQS9151_HOST_BACKLOG_HOLD. */
+uint32_t iqs9151_setting_host_mouse_backlog(void);
+
 #else
 
 static inline bool iqs9151_setting_one_hand_pinch(void) {
@@ -192,5 +198,7 @@ static inline void iqs9151_setting_ripple_measured(char axis, uint16_t period_x1
     ARG_UNUSED(axis);
     ARG_UNUSED(period_x10);
 }
+
+static inline uint32_t iqs9151_setting_host_mouse_backlog(void) { return 0; }
 
 #endif /* CONFIG_INPUT_IQS9151_RUNTIME_SETTINGS */

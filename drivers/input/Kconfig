@@ -134,6 +134,22 @@ config INPUT_IQS9151_CURSOR_REPORT_INTERVAL_MS
       it arrives in fewer, larger reports, at most this many milliseconds
       apart, and immediately when the finger lifts or a gesture begins.
 
+config INPUT_IQS9151_HOST_BACKLOG_HOLD
+    int "IQS9151 hold pointer movement while this many mouse reports wait for BLE (0 = off)"
+    range 0 20
+    default 1
+    depends on ZMK_BLE && ZMK_POINTING
+    help
+      On the half that talks to the host over BLE, ZMK queues mouse reports
+      (up to ZMK_BLE_MOUSE_REPORT_QUEUE_SIZE) and the sender waits for radio
+      buffers. When the host drains them slower than the pad produces them,
+      the queue fills and the pointer replays the past: lag that grows while
+      the finger moves. With this set, a frame's movement is added to the
+      owed amount instead of reported while at least this many reports are
+      still waiting, so the queue never grows past that and the movement is
+      delivered in fewer, larger reports. Only applies while the selected
+      endpoint is BLE; USB is untouched. 1 keeps at most one report waiting.
+
       For a split half whose pointer crosses a BLE link. The device delivers
       a frame every 5 ms and each is two input events, and a peripheral
       relays each event as its own notification: four hundred a second into
