@@ -185,6 +185,29 @@ config INPUT_IQS9151_TAP_DEAD_ZONE_MS
       A finger still inside the zone this long after landing is resting,
       not tapping, and its movement goes through from then on.
 
+config INPUT_IQS9151_LIFT_GUARD_FRAMES
+    int "IQS9151 hold this many frames of movement after a rest, dropped if the finger lifts (0 = off)"
+    range 0 8
+    default 2
+    help
+      A fingertip peels off the pad over a few frames, and in those frames
+      the reported position slides back toward the fingertip: the pointer
+      jumps as the finger leaves, and a click on a small target misses.
+      When movement starts again after the finger has rested for
+      INPUT_IQS9151_LIFT_GUARD_REST_MS, the first frames of it are held
+      back; if the finger lifts within them they are thrown away, and if
+      it keeps moving they go out and movement continues undelayed. Only
+      the start of a stroke after a pause is delayed, by this many frames
+      (5 ms each). Also the runtime setting lift_guard.
+
+config INPUT_IQS9151_LIFT_GUARD_REST_MS
+    int "IQS9151 how long a finger must rest before the lift guard re-arms, in milliseconds"
+    range 0 1000
+    default 60
+    help
+      Movement that resumes sooner than this after the last movement is
+      part of the same stroke and is not held.
+
 config INPUT_IQS9151_CURSOR_SMOOTHING
     int "IQS9151 spread each report's pointer movement over this many reports"
     range 1 8

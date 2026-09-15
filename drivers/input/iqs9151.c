@@ -648,6 +648,10 @@ struct iqs9151_data {
     int32_t cursor_pending_x;
     int32_t cursor_pending_y;
     int64_t cursor_report_ms;
+    /* Lift guard: when the last movement was, and how many frames of the
+     * current burst after a rest are still being held. */
+    int64_t cursor_move_ms;
+    uint8_t lift_guard_held;
     struct iqs9151_finger_history_entry finger_history[IQS9151_FINGER_HISTORY_SIZE];
     uint8_t finger_history_head;
     uint8_t finger_history_count;
@@ -2943,6 +2947,77 @@ static inline bool iqs9151_host_link_backlogged(int64_t now_ms) {
 }
 #endif
 
+static atomic_t iqs9151_lift_guard_frames = ATOMIC_INIT(CONFIG_INPUT_IQS9151_LIFT_GUARD_FRAMES);
+
+int iqs9151_set_lift_guard(uint8_t frames) {
+    atomic_set(&iqs9151_lift_guard_frames, (atomic_val_t)MIN(frames, 8U));
+    return 0;
+}
+
+/*
+ * Lift guard. A fingertip peels off over a few frames, and the position the
+ * device reports slides back toward the fingertip as it does -- the mirror
+ * of the landing drift the dead zone handles. A finger that has come to rest
+ * and then lifts (a click on a target) produces exactly that: a short burst
+ * of movement, then nothing. So movement that starts after a rest is held
+ * for a few frames. If the finger lifts within them, the burst was the lift
+ * and it is dropped; if it keeps moving, the burst was a stroke and it goes
+ * out, and from then on nothing is delayed.
+ *
+ * Returns true when this frame's movement is to stay owed.
+ */
+static bool iqs9151_lift_guard_holds(struct iqs9151_data *data, int64_t now_ms) {
+    const uint8_t frames = (uint8_t)atomic_get(&iqs9151_lift_guard_frames);
+
+    if (frames == 0U) {
+        data->lift_guard_held = 0U;
+        return false;
+    }
+    if (now_ms - data->cursor_move_ms >= CONFIG_INPUT_IQS9151_LIFT_GUARD_REST_MS) {
+        data->lift_guard_held = 0U; /* a new burst after a rest */
+    }
+    data->cursor_move_ms = now_ms;
+    if (data->lift_guard_held < frames) {
+        data->lift_guard_held++;
+        return true;
+    }
+    /* Past the guard: the burst was a stroke. Mark it so a later lift does
+     * not drop the ordinary owed remainder. */
+    data->lift_guard_held = frames + 1U;
+    return false;
+}
+
+static void iqs9151_report_cursor(struct iqs9151_data *data, int32_t dx, int32_t dy, int64_t now_ms,
+                                  bool flush);
+
+static bool iqs9151_lift_guard_holding(const struct iqs9151_data *data) {
+    const uint8_t frames = (uint8_t)atomic_get(&iqs9151_lift_guard_frames);
+
+    return frames != 0U && data->lift_guard_held != 0U && data->lift_guard_held <= frames;
+}
+
+/*
+ * A frame that is not one finger moving. The finger left, or another landed:
+ * a burst still held was the lift (or the settling before the second
+ * finger) and is dropped. One finger resting: keep holding through the
+ * rest, since the device can report a quiet frame between the peel and
+ * the release; once the rest outlasts the guard's window the burst was a
+ * real twitch and goes out late rather than never.
+ */
+static void iqs9151_flush_cursor_for_frame(struct iqs9151_data *data,
+                                           const struct iqs9151_frame *frame, int64_t now_ms) {
+    if (iqs9151_lift_guard_holding(data)) {
+        if (frame->finger_count != 1U) {
+            data->cursor_pending_x = 0;
+            data->cursor_pending_y = 0;
+        } else if (now_ms - data->cursor_move_ms < CONFIG_INPUT_IQS9151_LIFT_GUARD_REST_MS) {
+            return;
+        }
+        data->lift_guard_held = 0U;
+    }
+    iqs9151_report_cursor(data, 0, 0, now_ms, true);
+}
+
 static void iqs9151_report_cursor(struct iqs9151_data *data, int32_t dx, int32_t dy,
                                   int64_t now_ms, bool flush) {
     const struct device *dev = data->dev;
@@ -2950,6 +3025,9 @@ static void iqs9151_report_cursor(struct iqs9151_data *data, int32_t dx, int32_t
 
     data->cursor_pending_x += dx;
     data->cursor_pending_y += dy;
+    if (!flush && iqs9151_lift_guard_holds(data, now_ms)) {
+        return;
+    }
     if (data->cursor_pending_x == 0 && data->cursor_pending_y == 0) {
         return;
     }
@@ -2990,7 +3068,7 @@ static void iqs9151_report_frame_events(struct iqs9151_data *data,
      * through the whole scroll, to arrive as a stray jump at the end. */
     if (frame->finger_count != 1U || !cursor_moving || suppress_cursor_tail ||
         data->three_active) {
-        iqs9151_report_cursor(data, 0, 0, now_ms, true);
+        iqs9151_flush_cursor_for_frame(data, frame, now_ms);
     }
 
     if (two_result->swipe_code != 0U) {

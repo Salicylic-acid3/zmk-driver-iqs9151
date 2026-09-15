@@ -149,6 +149,13 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
     ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_INT32(0, 200));
 
 ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
+    iqs9151_lift_guard, IQS9151_SETTINGS_SUBSYSTEM_ID, IQS9151_SETTING_LIFT_GUARD_KEY,
+    ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+    ZMK_CUSTOM_SETTING_VALUE_INT32(CONFIG_INPUT_IQS9151_LIFT_GUARD_FRAMES),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_INT32(0, 8));
+
+ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
     iqs9151_cursor_distance_smoothing, IQS9151_SETTINGS_SUBSYSTEM_ID,
     IQS9151_SETTING_CURSOR_DISTANCE_SMOOTHING_KEY, ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
     ZMK_CUSTOM_SETTING_VALUE_INT32(CONFIG_INPUT_IQS9151_CURSOR_DISTANCE_SMOOTHING),
@@ -366,6 +373,10 @@ static void apply_cursor_gain(void) {
         read_int32(IQS9151_SETTING_TAP_DEAD_ZONE_KEY, CONFIG_INPUT_IQS9151_TAP_DEAD_ZONE);
     (void)iqs9151_set_tap_dead_zone((uint16_t)dead_zone);
 
+    const int32_t lift_guard =
+        read_int32(IQS9151_SETTING_LIFT_GUARD_KEY, CONFIG_INPUT_IQS9151_LIFT_GUARD_FRAMES);
+    (void)iqs9151_set_lift_guard((uint8_t)CLAMP(lift_guard, 0, 8));
+
     const int32_t distance = read_int32(IQS9151_SETTING_CURSOR_DISTANCE_SMOOTHING_KEY,
                                         CONFIG_INPUT_IQS9151_CURSOR_DISTANCE_SMOOTHING);
     (void)iqs9151_set_cursor_distance_smoothing((uint16_t)distance);
@@ -479,6 +490,7 @@ static int iqs9151_settings_event_listener(const zmk_event_t *eh) {
                strcmp(changed->setting->key, IQS9151_SETTING_CURSOR_GAIN_Y_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_CURSOR_SMOOTHING_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_TAP_DEAD_ZONE_KEY) == 0 ||
+               strcmp(changed->setting->key, IQS9151_SETTING_LIFT_GUARD_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_CURSOR_DISTANCE_SMOOTHING_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_RIPPLE_PERIOD_X_X10_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_RIPPLE_PERIOD_Y_X10_KEY) == 0 ||

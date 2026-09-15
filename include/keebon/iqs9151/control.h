@@ -91,6 +91,13 @@ int iqs9151_set_cursor_smoothing(uint16_t reports);
 int iqs9151_set_tap_dead_zone(uint16_t counts);
 
 /**
+ * Hold the first frames of movement after a rest and drop them if the finger
+ * lifts within them, so a lifting fingertip's slide does not move the pointer.
+ * 0 holds nothing. See INPUT_IQS9151_LIFT_GUARD_FRAMES.
+ */
+int iqs9151_set_lift_guard(uint8_t frames);
+
+/**
  * Average the pointer over this many counts of finger travel; 0 turns it off.
  *
  * Unlike the report smoothing above, this window is measured in distance, so it

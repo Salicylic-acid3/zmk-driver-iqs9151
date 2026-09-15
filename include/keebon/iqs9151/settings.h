@@ -83,6 +83,9 @@
 #define IQS9151_SETTING_CURSOR_SMOOTHING_KEY "cursor_smoothing"
 /* Pointer movement withheld after a finger lands, in counts (0 = none). */
 #define IQS9151_SETTING_TAP_DEAD_ZONE_KEY "tap_dead_zone"
+/* Frames of movement held after a rest and dropped if the finger lifts within
+ * them, 0..8 (0 = off). */
+#define IQS9151_SETTING_LIFT_GUARD_KEY "lift_guard"
 
 /* Counts of finger travel to average the pointer over; 0 is off. A window in
  * distance rather than reports, so it flattens a ripple fixed in millimetres at
