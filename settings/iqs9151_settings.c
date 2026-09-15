@@ -335,6 +335,8 @@ bool iqs9151_setting_one_hand_pinch(void) {
                      IS_ENABLED(CONFIG_INPUT_IQS9151_2F_PINCH_ENABLE));
 }
 
+static int32_t read_int32(const char *key, int32_t fallback);
+
 /*
  * Cached, because the driver asks on every two-finger frame and a settings
  * lookup by key is not free. The listener below refreshes it on a change.
