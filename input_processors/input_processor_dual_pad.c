@@ -32,8 +32,13 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <dt-bindings/zmk/zip_dynamic_scale.h>
 #include <zmk/behavior.h>
 #include <zmk/virtual_key_position.h>
+#include <dt-bindings/zmk/dual_pad.h>
+#if IS_ENABLED(CONFIG_ZMK_RUNTIME_INPUT_PROCESSOR)
+#include <zmk/pointing/input_processor_runtime.h>
+#endif
 
 #define DUAL_PAD_SIDES 2
+#define DUAL_PAD_SCROLL_PROCS_MAX 4
 
 /*
  * param2 flags. The devicetree properties set the board's baseline; these flip
@@ -41,8 +46,9 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * different orientation - which is how the scroll direction follows the OS
  * without a rebuild.
  */
-#define DUAL_PAD_FLAG_INVERT_SCROLL BIT(0)
-#define DUAL_PAD_FLAG_INVERT_ZOOM BIT(1)
+#define DUAL_PAD_FLAG_INVERT_SCROLL DUAL_PAD_INVERT_SCROLL
+#define DUAL_PAD_FLAG_INVERT_ZOOM DUAL_PAD_INVERT_ZOOM
+#define DUAL_PAD_SCROLL_PROC_INDEX(param2) (((param2) >> 8) & 0xF)
 
 enum dual_pad_mode {
     DUAL_PAD_MODE_NONE = 0,
@@ -62,7 +68,46 @@ struct dual_pad_config {
     bool vertical_is_pad_x; /* the pad axis that arrives as INPUT_REL_Y */
     bool has_zoom_binding;
     struct zmk_behavior_binding zoom_binding;
+    /* The chain's runtime scroll processors, by DUAL_PAD_SCROLL_PROC index. */
+    const struct device *scroll_procs[DUAL_PAD_SCROLL_PROCS_MAX];
+    uint8_t scroll_proc_count;
 };
+
+/*
+ * What the chain's own scroll processing would have done to a one-pad
+ * scroll: the app's axis invert and scroll speed live in the runtime scroll
+ * processor, which sits before this one in the chain, so the wheel this
+ * processor emits never passes through it. Read them and apply them here.
+ */
+struct dual_pad_scroll_tune {
+    bool x_invert;
+    bool y_invert;
+    uint32_t mul;
+    uint32_t div;
+};
+
+static struct dual_pad_scroll_tune dual_pad_scroll_tune(const struct dual_pad_config *cfg,
+                                                        uint32_t param2) {
+    struct dual_pad_scroll_tune t = {.mul = 1, .div = 1};
+#if IS_ENABLED(CONFIG_ZMK_RUNTIME_INPUT_PROCESSOR)
+    const uint32_t idx = DUAL_PAD_SCROLL_PROC_INDEX(param2);
+    if (idx < cfg->scroll_proc_count && cfg->scroll_procs[idx] != NULL) {
+        struct zmk_input_processor_runtime_config rc;
+        if (zmk_input_processor_runtime_get_config(cfg->scroll_procs[idx], NULL, &rc) == 0) {
+            t.x_invert = rc.x_invert;
+            t.y_invert = rc.y_invert;
+            if (rc.scale_multiplier > 0 && rc.scale_divisor > 0) {
+                t.mul = rc.scale_multiplier;
+                t.div = rc.scale_divisor;
+            }
+        }
+    }
+#else
+    ARG_UNUSED(cfg);
+    ARG_UNUSED(param2);
+#endif
+    return t;
+}
 
 struct dual_pad_data {
     /*
@@ -237,12 +282,16 @@ static int dual_pad_handle_event(const struct device *dev, struct input_event *e
 #else
             const int64_t xy_x10 = 10, sc_x10 = 10;
 #endif
-            const int64_t per_notch = (int64_t)cfg->scroll_divisor * gain_x10 * xy_x10;
-            const int32_t out = (int32_t)(((int64_t)along * 10 * sc_x10) / per_notch);
+            /* ... and what the chain's runtime scroll processor would have
+             * done: the app's scroll speed, and its axis invert below. */
+            const struct dual_pad_scroll_tune tune = dual_pad_scroll_tune(cfg, param2);
+            const int64_t per_notch = (int64_t)cfg->scroll_divisor * gain_x10 * xy_x10 * tune.div;
+            const int64_t scale = 10 * sc_x10 * tune.mul;
+            const int32_t out = (int32_t)(((int64_t)along * scale) / per_notch);
             if (out != 0) {
                 /* What those notches were worth in the arriving units; the
                  * rounding left over stays in the accumulators. */
-                const int32_t consumed = (int32_t)(((int64_t)out * per_notch) / (10 * sc_x10));
+                const int32_t consumed = (int32_t)(((int64_t)out * per_notch) / scale);
                 if (vertical) {
                     data->acc_y[0] -= consumed;
                     data->acc_y[1] -= consumed;
@@ -252,7 +301,8 @@ static int dual_pad_handle_event(const struct device *dev, struct input_event *e
                 }
 
                 out_code = vertical ? INPUT_REL_WHEEL : INPUT_REL_HWHEEL;
-                out_value = invert_scroll ? -out : out;
+                const bool app_invert = vertical ? tune.y_invert : tune.x_invert;
+                out_value = (invert_scroll != app_invert) ? -out : out;
                 action = DUAL_PAD_EMIT;
             } else {
                 action = DUAL_PAD_SWALLOW;
@@ -290,6 +340,10 @@ static int dual_pad_init(const struct device *dev) { return 0; }
     COND_CODE_1(DT_INST_NODE_HAS_PROP(n, bindings),                                                \
                 (ZMK_KEYMAP_EXTRACT_BINDING(0, DT_DRV_INST(n))), ({0}))
 
+/* One entry of scroll-processors as a device pointer; the empty list is fine. */
+#define DUAL_PAD_SCROLL_PROC_DEV(node_id, prop, idx)                                               \
+    DEVICE_DT_GET(DT_PHANDLE_BY_IDX(node_id, prop, idx))
+
 #define DUAL_PAD_INST(n)                                                                           \
     static struct dual_pad_data dual_pad_data_##n;                                                 \
     static const struct dual_pad_config dual_pad_config_##n = {                                    \
@@ -304,7 +358,14 @@ static int dual_pad_init(const struct device *dev) { return 0; }
         .vertical_is_pad_x = DT_INST_ENUM_IDX_OR(n, vertical_pad_axis, 0) == 0,                    \
         .has_zoom_binding = DT_INST_NODE_HAS_PROP(n, bindings),                                    \
         .zoom_binding = DUAL_PAD_ZOOM_BINDING(n),                                                  \
+        .scroll_procs = {COND_CODE_1(                                                              \
+            DT_INST_NODE_HAS_PROP(n, scroll_processors),                                           \
+            (DT_INST_FOREACH_PROP_ELEM_SEP(n, scroll_processors, DUAL_PAD_SCROLL_PROC_DEV, (, ))), \
+            ())},                                                                                  \
+        .scroll_proc_count = DT_INST_PROP_LEN_OR(n, scroll_processors, 0),                         \
     };                                                                                             \
+    BUILD_ASSERT(DT_INST_PROP_LEN_OR(n, scroll_processors, 0) <= DUAL_PAD_SCROLL_PROCS_MAX,        \
+                 "too many scroll-processors");                                                    \
     DEVICE_DT_INST_DEFINE(n, &dual_pad_init, NULL, &dual_pad_data_##n, &dual_pad_config_##n,       \
                           POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT, &dual_pad_driver_api);
 

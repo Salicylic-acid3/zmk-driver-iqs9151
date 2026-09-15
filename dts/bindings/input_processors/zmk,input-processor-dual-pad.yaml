@@ -4,9 +4,11 @@ description: |
   Fuses one finger on each half of a split trackpad into a single gesture.
   Reference it from both listeners with param1 = 0 for the left pad and
   param1 = 1 for the right one; the two references share state. param2 carries
-  flags that flip the configured directions for that reference: bit 0 inverts
-  scroll, bit 1 inverts zoom, so a listener layer override can switch
-  orientation per layer.
+  flags for that reference (see dt-bindings/zmk/dual_pad.h): bit 0 inverts
+  scroll, bit 1 inverts zoom, and bits 8..11 are the index into
+  scroll-processors of the runtime scroll processor this chain uses, so the
+  two-hand scroll follows the same runtime invert and speed as the one-pad
+  scroll on that chain.
 
 compatible: "zmk,input-processor-dual-pad"
 
@@ -61,6 +63,17 @@ properties:
   invert-zoom:
     type: boolean
     description: Flip which way pinching in and out zooms.
+
+  scroll-processors:
+    type: phandles
+    description: |
+      The runtime scroll processors (zmk,input-processor-runtime) the
+      listener chains put two-finger scroll through, one per chain that
+      references this node with a different DUAL_PAD_SCROLL_PROC index. The
+      processor named by the reference's index lends its axis invert and its
+      scale to the two-hand scroll, which this processor emits after the
+      chain's own scroll processing has already run. Without it the two-hand
+      scroll ignores the app's scroll invert and speed.
 
   bindings:
     type: phandle-array
