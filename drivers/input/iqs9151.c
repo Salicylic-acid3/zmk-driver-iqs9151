@@ -668,6 +668,10 @@ struct iqs9151_data {
     struct k_work_delayable recover_work;
     uint32_t recover_count;
     int64_t recover_last_ms;
+    /* Retrying the bring-up when init could not get through it. See
+     * iqs9151_bringup_work_handler. */
+    struct k_work_delayable bringup_work;
+    uint8_t bringup_attempts;
     /*
      * Tenths carried between reports when the cursor gain is not a whole
      * number. Without them a 1.6x gain on a stream of 1-count reports rounds
@@ -4929,22 +4933,21 @@ static int iqs9151_wait_for_show_reset(const struct device *dev, uint16_t timeou
     return -EIO;
 }
 
-static int iqs9151_sw_reset(const struct device *dev) {
+/*
+ * Ask the IC to reset itself. One write, deliberately: with the IC in event
+ * mode a STOP ends the communication window (Config Settings bit 6 is 0), so
+ * a read-modify-write is two windows, and the second one never comes with
+ * nothing on the pad. The other System Control bits are the driver's baseline
+ * (all clear), so there is nothing to preserve. The reset happens after the
+ * window closes and takes a few milliseconds; the caller decides whether to
+ * wait for SHOW_RESET.
+ */
+static int iqs9151_sw_reset_request(const struct device *dev) {
     const struct iqs9151_config *cfg = dev->config;
     uint8_t ctrl[2];
     int ret;
 
-    ret = iqs9151_i2c_read(cfg, IQS9151_ADDR_SYSTEM_CONTROL, ctrl, sizeof(ctrl));
-    if (ret != 0) {
-        LOG_ERR("Read SYSTEM CONTROL(SW_RESET) failed (%d)", ret);
-        return ret;
-    }
-
-    uint16_t config = sys_get_le16(ctrl);
-    config |= IQS9151_SYS_CTRL_SW_RESET;
-    sys_put_le16(config, ctrl);
-
-    iqs9151_wait_for_ready(dev, 500);
+    sys_put_le16(IQS9151_SYS_CTRL_SW_RESET, ctrl);
 
     ret = iqs9151_i2c_write(cfg, IQS9151_ADDR_SYSTEM_CONTROL, ctrl, sizeof(ctrl));
     if (ret != 0) {
@@ -4952,12 +4955,7 @@ static int iqs9151_sw_reset(const struct device *dev) {
         return ret;
     }
 
-    ret = iqs9151_wait_for_show_reset(dev, 3000);
-    if (ret != 0) {
-        return ret;
-    }
-
-    return ret;
+    return 0;
 }
 
 static int iqs9151_set_event_mode(const struct device *dev) {
@@ -5405,38 +5403,25 @@ static void iqs9151_request_recovery(struct iqs9151_data *data) {
     k_work_schedule_for_queue(&iqs9151_recovery_q, &data->recover_work, K_MSEC(wait_ms));
 }
 
-static int iqs9151_init(const struct device *dev) {
+/*
+ * Everything that talks to the IC to get it from whatever state it is in to
+ * "configured, tuned, in event mode, interrupt armed". Runs from init, and
+ * again from the recovery thread when init could not get through it.
+ *
+ * Its first job is to find a state the IC will answer from. Two are
+ * possible at boot:
+ *
+ *  - freshly powered: streaming, RDY low within a few tens of ms;
+ *  - configured and in event mode, because the MCU reset and the pad did not
+ *    lose power: a wake from deep sleep (nRF System OFF ends in a reset), a
+ *    watchdog reset, a brownout the nRF saw and the IC did not. RDY stays
+ *    high with nothing on the pad, and the IC has to be asked for a window.
+ *    See iqs9151_force_comms.
+ */
+static int iqs9151_bring_up(const struct device *dev) {
     const struct iqs9151_config *cfg = dev->config;
-    struct iqs9151_data *data = dev->data;
     int ret;
-    data->dev = dev;
 
-    LOG_DBG("Initialization Start");
-
-    if (!device_is_ready(cfg->i2c.bus)) {
-        LOG_ERR("I2C bus not ready");
-        return -ENODEV;
-    }
-
-    if (!cfg->irq_gpio.port) {
-        LOG_ERR("IRQ GPIO not defined");
-        return -ENODEV;
-    }
-    if (!device_is_ready(cfg->irq_gpio.port)) {
-        LOG_ERR("IRQ GPIO not ready");
-        return -ENODEV;
-    }
-    ret = gpio_pin_configure_dt(&cfg->irq_gpio, GPIO_INPUT);
-    if (ret) {
-        return ret;
-    }
-
-    /*
-     * A freshly powered IC is streaming and pulls RDY low within a few tens
-     * of milliseconds. One that kept its configuration across an MCU-only
-     * reset is in event mode and will not, with nothing on the pad -- see
-     * iqs9151_force_comms. Give it the short wait, then ask.
-     */
     iqs9151_wait_for_ready(dev, 300);
     if (!gpio_pin_get_dt(&cfg->irq_gpio)) {
         LOG_WRN("No RDY after power-up: pad kept its state across an MCU reset; "
@@ -5447,22 +5432,36 @@ static int iqs9151_init(const struct device *dev) {
         }
         iqs9151_wait_for_ready(dev, 1200);
     }
-    
-    // Check Product Number
-    ret = iqs9151_check_product_number(dev);
+
+    /*
+     * Reset first, from inside whatever window this is. An IC that kept its
+     * state is in event mode, where a STOP ends the window and the next one
+     * only comes with an event: anything read before the reset spends the
+     * one window there is, and the reset write that follows is refused. The
+     * old order -- product number, then a read-modify-write reset -- did
+     * exactly that, and is why a pad that kept its state stayed down. After
+     * the reset the IC streams, and every step below gets a window per cycle.
+     */
+    ret = iqs9151_sw_reset_request(dev);
     if (ret != 0) {
-        return ret;
-    }
-
-    iqs9151_wait_for_ready(dev, 500);
-
-    // SW Reset (Show Reset wait + ACK)
-    ret = iqs9151_sw_reset(dev);
-    if (ret) {
         LOG_ERR("SW Reset failed (%d)", ret);
         return ret;
     }
+    ret = iqs9151_wait_for_show_reset(dev, 3000);
+    if (ret != 0) {
+        LOG_ERR("SW Reset not reported (%d)", ret);
+        return ret;
+    }
     LOG_DBG("SW Reset complete");
+
+    iqs9151_wait_for_ready(dev, 500);
+
+    // Check Product Number
+    ret = iqs9151_check_product_number(dev);
+    if (ret != 0) {
+        LOG_ERR("Product number read failed (%d)", ret);
+        return ret;
+    }
 
     iqs9151_wait_for_ready(dev, 500);
 
@@ -5503,11 +5502,111 @@ static int iqs9151_init(const struct device *dev) {
     }
     LOG_DBG("ATI complete");
 
+    iqs9151_wait_for_ready(dev, 100);
+
+    // Set Event Mode
+    ret = iqs9151_set_event_mode(dev);
+    if (ret) {
+        LOG_ERR("Set Event Mode failed (%d)", ret);
+        return ret;
+    }
+    LOG_DBG("Set Event Mode complete");
+
+    // start IRQ
+    iqs9151_set_interrupt(dev, true);
+    return 0;
+}
+
+/*
+ * Bring-up that did not get through at init, tried again from the recovery
+ * thread.
+ *
+ * Init used to return the error, which leaves a device Zephyr considers
+ * broken and nothing that will ever look at it again: the keys work, the pad
+ * is dead until the half is power-cycled. That is the symptom on the wireless
+ * half after deep sleep. A retry a second later, with the I2C bus clocked
+ * clean first in case the IC was left holding SDA, costs nothing when it is
+ * not needed and turns "power-cycle the half" into "wait a moment".
+ *
+ * Backs off (1, 2, 4, 8, 16 s) so a pad that is genuinely absent does not keep
+ * the bus busy, and gives up after that with a message that says what to do.
+ */
+#define IQS9151_BRINGUP_ATTEMPTS 6
+#define IQS9151_BRINGUP_FIRST_DELAY_MS 1000
+
+static void iqs9151_bringup_work_handler(struct k_work *work) {
+    struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+    struct iqs9151_data *data = CONTAINER_OF(dwork, struct iqs9151_data, bringup_work);
+    const struct device *dev = data->dev;
+    const struct iqs9151_config *cfg = dev->config;
+    int ret;
+
+    data->bringup_attempts++;
+
+    /* Nine clocks on SCL free an IC that was mid-byte when the MCU went
+     * away. Harmless on a bus that is already free; -ENOSYS on a controller
+     * that cannot do it, which is fine too. */
+    ret = i2c_recover_bus(cfg->i2c.bus);
+    if (ret != 0 && ret != -ENOSYS) {
+        LOG_WRN("I2C bus recovery failed (%d)", ret);
+    }
+
+    ret = iqs9151_bring_up(dev);
+    if (ret == 0) {
+        LOG_WRN("Trackpad came up on retry %u", data->bringup_attempts);
+        return;
+    }
+
+    if (data->bringup_attempts >= IQS9151_BRINGUP_ATTEMPTS) {
+        LOG_ERR("Trackpad did not come up after %u attempts (%d); "
+                "power-cycle this half",
+                data->bringup_attempts, ret);
+        return;
+    }
+
+    const uint32_t delay_ms = IQS9151_BRINGUP_FIRST_DELAY_MS << (data->bringup_attempts - 1U);
+
+    LOG_WRN("Trackpad bring-up failed (%d); retrying in %u ms", ret, delay_ms);
+    k_work_schedule_for_queue(&iqs9151_recovery_q, &data->bringup_work, K_MSEC(delay_ms));
+}
+
+static void iqs9151_schedule_bringup(struct iqs9151_data *data, k_timeout_t delay) {
+    data->bringup_attempts = 0U;
+    k_work_schedule_for_queue(&iqs9151_recovery_q, &data->bringup_work, delay);
+}
+
+static int iqs9151_init(const struct device *dev) {
+    const struct iqs9151_config *cfg = dev->config;
+    struct iqs9151_data *data = dev->data;
+    int ret;
+    data->dev = dev;
+
+    LOG_DBG("Initialization Start");
+
+    if (!device_is_ready(cfg->i2c.bus)) {
+        LOG_ERR("I2C bus not ready");
+        return -ENODEV;
+    }
+
+    if (!cfg->irq_gpio.port) {
+        LOG_ERR("IRQ GPIO not defined");
+        return -ENODEV;
+    }
+    if (!device_is_ready(cfg->irq_gpio.port)) {
+        LOG_ERR("IRQ GPIO not ready");
+        return -ENODEV;
+    }
+    ret = gpio_pin_configure_dt(&cfg->irq_gpio, GPIO_INPUT);
+    if (ret) {
+        return ret;
+    }
+
     /*
      * One recovery queue for every IQS9151 on this half. Started here, on the
      * first instance to get this far, because a work queue needs a thread and
      * a thread needs somewhere to run: doing it at init keeps the rebuild off
-     * the system work queue that ZMK's watchdog feeds from.
+     * the system work queue that ZMK's watchdog feeds from. Before the bring-up,
+     * so a bring-up that fails has somewhere to retry from.
      */
     if (!iqs9151_recovery_q_started) {
         k_work_queue_start(&iqs9151_recovery_q, iqs9151_recovery_stack,
@@ -5517,6 +5616,7 @@ static int iqs9151_init(const struct device *dev) {
         iqs9151_recovery_q_started = true;
     }
     k_work_init_delayable(&data->recover_work, iqs9151_recover_work_handler);
+    k_work_init_delayable(&data->bringup_work, iqs9151_bringup_work_handler);
     k_work_init(&data->map_save_work, iqs9151_map_save_work_handler);
 
     // Setup IRQ Call Back
@@ -5552,18 +5652,15 @@ static int iqs9151_init(const struct device *dev) {
         return -EIO;
     }
 
-    iqs9151_wait_for_ready(dev, 100);
-
-    // Set Event Mode
-    ret = iqs9151_set_event_mode(dev);
-    if (ret) {
-        LOG_ERR("Set Event Mode failed (%d)", ret);
-        return ret;
+    ret = iqs9151_bring_up(dev);
+    if (ret != 0) {
+        /* Not an init failure: the device stays registered and the recovery
+         * thread keeps trying. See iqs9151_bringup_work_handler. */
+        LOG_WRN("Trackpad bring-up failed at boot (%d); retrying shortly", ret);
+        iqs9151_schedule_bringup(data, K_MSEC(IQS9151_BRINGUP_FIRST_DELAY_MS));
+        return 0;
     }
-    LOG_DBG("Set Event Mode complete complete");
 
-    // start IRQ
-    iqs9151_set_interrupt(dev, true);
     LOG_DBG("Initialization complete");
     return 0;
 }
