@@ -1,0 +1,35 @@
+description: |
+  One binding that holds two behaviors at once.
+
+  `&tp_hold LSHIFT MB3` presses the first behavior in "bindings" with the
+  first parameter and the second behavior with the second parameter, and
+  releases both when the key is released. A parameter of 0 skips that
+  behavior. Made for the trackpad's "held while a finger is on the pad"
+  position, where a modifier and a mouse button are wanted together:
+
+      tp_hold: tp_hold {
+          compatible = "zmk,behavior-press-both";
+          #binding-cells = <2>;
+          display-name = "Key + Mouse Button";
+          bindings = <&kp>, <&mkp>;
+      };
+
+  Parameter metadata comes from the two behaviors, so Keeb-On! Studio
+  offers a keycode for the first parameter and a mouse button for the
+  second.
+
+compatible: "zmk,behavior-press-both"
+
+properties:
+  display-name:
+    type: string
+
+  "#binding-cells":
+    type: int
+    required: true
+    const: 2
+
+  bindings:
+    type: phandles
+    required: true
+    description: Exactly two one-parameter behaviors, first then second.

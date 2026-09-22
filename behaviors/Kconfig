@@ -27,3 +27,11 @@ menuconfig ZMK_BEHAVIOR_DRAG_CLICK
       released for as long as a finger is on either trackpad. Uses the raw
       touch state event (INPUT_IQS9151_TOUCH_STATE_ENABLE) to know when the
       last finger leaves.
+
+menuconfig ZMK_BEHAVIOR_PRESS_BOTH
+    bool "Press-both behavior"
+    default y
+    help
+      One binding that holds two behaviors at once (a keycode and a mouse
+      button, for example) and releases both. Used for the trackpad's
+      "held while a finger is on the pad" position.
