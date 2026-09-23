@@ -355,12 +355,21 @@ bool iqs9151_setting_swipe2_allowed(void) {
         return true;
     }
 #if !IS_ENABLED(CONFIG_ZMK_SPLIT) || IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    for (uint8_t layer = 0; layer < ZMK_KEYMAP_LAYERS_LEN && layer < 32U; layer++) {
-        if ((mask & BIT(layer)) != 0U && zmk_keymap_layer_active(layer)) {
-            return true;
-        }
-    }
-    return false;
+    /*
+     * The layer that is "on" is the highest active one, the same way the app
+     * shows it and the keymap resolves a key. The first version asked whether
+     * *any* allowed layer was active -- and the base layer always is, so a
+     * momentary layer with its switch off still swiped whenever Base's switch
+     * was on. Sideways enough and the movement became a swipe bound to
+     * nothing; not quite sideways enough and it scrolled: the "sometimes it
+     * scrolls" that was reported.
+     */
+    /* The mask is by layer id (what the app and the keymap file use); the
+     * "highest active" query answers with an index. */
+    const zmk_keymap_layer_id_t layer =
+        zmk_keymap_layer_index_to_id(zmk_keymap_highest_layer_active());
+
+    return layer < 32U && (mask & BIT(layer)) != 0U;
 #else
     /* A peripheral has no keymap and cannot tell which layer is active. */
     return true;
