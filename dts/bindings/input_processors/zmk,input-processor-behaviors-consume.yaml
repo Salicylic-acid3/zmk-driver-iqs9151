@@ -24,3 +24,9 @@ properties:
       going through this processor, not gestures: the binding is pressed when
       the first device reports 1 and released when the last reports 0, and
       the event is passed on unchanged for processors further down the chain.
+  held-skip-default-layer:
+    type: boolean
+    description: |
+      A touch that begins with the default layer on top presses no held
+      binding, whatever that layer has on the position. Held bindings also
+      follow the top layer: leaving the layer releases them at once.
