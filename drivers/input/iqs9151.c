@@ -54,6 +54,30 @@ LOG_MODULE_REGISTER(iqs9151, CONFIG_INPUT_IQS9151_LOG_LEVEL);
 #define EMA_FP_SHIFT INERTIA_FP_SHIFT
 #define EMA_ALPHA_DEN (1 << EMA_FP_SHIFT)
 #define IQS9151_FRAME_READ_SIZE 28
+
+/*
+ * Register writes requested at run time (resolution, the filter block) do not
+ * get a transaction of their own. See iqs9151_read_frame_with_writes.
+ */
+#define IQS9151_MAX_PENDING_WRITES 4
+
+struct iqs9151_pending_write {
+    uint8_t buf[2 + 8]; /* register address (LE16) then up to 8 bytes */
+    uint8_t len;        /* bytes in buf, address included */
+};
+
+struct iqs9151_pending {
+    struct iqs9151_pending_write writes[IQS9151_MAX_PENDING_WRITES];
+    size_t count;
+    bool resolution;
+    atomic_val_t resolution_generation;
+    uint16_t x_resolution;
+    uint16_t y_resolution;
+    bool filter;
+    atomic_val_t filter_generation;
+    struct iqs9151_filter_tune tune;
+};
+
 #define IQS9151_INERTIA_MOTION_HISTORY_SIZE 12
 
 #define SCROLL_INERTIA_INTERVAL_MS 10
@@ -2583,6 +2607,65 @@ static int iqs9151_read_frame(const struct iqs9151_config *cfg,
     return 0;
 }
 
+/*
+ * The frame read with pending register writes in front of it, all in one bus
+ * transaction joined by repeated starts.
+ *
+ * This is the only way a run-time register write reaches the device. The
+ * configuration puts the IQS9151 in event mode with Config Settings bit 6
+ * clear, so an I2C STOP ends the communication window (datasheet 13.7), and
+ * bit 4 set, so a transaction outside a window is refused rather than
+ * clock-stretched. The frame read ends with a STOP; anything written after it
+ * in the same work item was addressed to a device that had stopped listening,
+ * failed with -EIO, and was "retried next frame" -- every frame, forever. That
+ * is how the touch thresholds, the finger split factor and the resolution
+ * could be changed from the app with no effect on the pad whatsoever.
+ *
+ * Each write is its own message with I2C_MSG_RESTART, so the nRF TWIM driver
+ * issues a repeated start between them instead of concatenating the buffers
+ * (which it does for consecutive same-direction messages without that flag).
+ * The read carries the STOP.
+ */
+static int iqs9151_read_frame_with_writes(const struct iqs9151_config *cfg,
+                                          const struct iqs9151_pending_write *writes,
+                                          size_t write_count, struct iqs9151_frame *frame) {
+    uint8_t raw_frame[IQS9151_FRAME_READ_SIZE];
+    uint8_t addr_buf[2];
+    struct i2c_msg msgs[IQS9151_MAX_PENDING_WRITES + 2];
+    size_t count = 0;
+    int ret;
+
+    if (write_count > IQS9151_MAX_PENDING_WRITES) {
+        return -EINVAL;
+    }
+
+    for (size_t i = 0; i < write_count; i++) {
+        msgs[count].buf = (uint8_t *)writes[i].buf;
+        msgs[count].len = writes[i].len;
+        msgs[count].flags = I2C_MSG_WRITE | (count > 0 ? I2C_MSG_RESTART : 0);
+        count++;
+    }
+
+    sys_put_le16(IQS9151_ADDR_RELATIVE_X, addr_buf);
+    msgs[count].buf = addr_buf;
+    msgs[count].len = sizeof(addr_buf);
+    msgs[count].flags = I2C_MSG_WRITE | (count > 0 ? I2C_MSG_RESTART : 0);
+    count++;
+
+    msgs[count].buf = raw_frame;
+    msgs[count].len = sizeof(raw_frame);
+    msgs[count].flags = I2C_MSG_READ | I2C_MSG_RESTART | I2C_MSG_STOP;
+    count++;
+
+    ret = i2c_transfer_dt(&cfg->i2c, msgs, count);
+    if (ret != 0) {
+        return ret;
+    }
+
+    iqs9151_parse_frame(raw_frame, frame);
+    return 0;
+}
+
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_TOUCH_STATE_ENABLE)
 
 /*
@@ -3217,8 +3300,11 @@ static void iqs9151_process_frame(struct iqs9151_data *data,
 static int iqs9151_set_interrupt(const struct device *dev, const bool en);
 
 /* Defined below, next to the rest of the register writes. */
-static void iqs9151_apply_requested_resolution(const struct device *dev);
-static void iqs9151_apply_requested_filter(const struct device *dev);
+static void iqs9151_collect_requested_resolution(const struct device *dev,
+                                                 struct iqs9151_pending *pending);
+static void iqs9151_collect_requested_filter(const struct device *dev,
+                                             struct iqs9151_pending *pending);
+static void iqs9151_commit_pending(const struct device *dev, const struct iqs9151_pending *pending);
 
 /*
  * Per-axis cursor gain, applied to what the device reports.
@@ -4701,18 +4787,30 @@ static void iqs9151_work_cb(struct k_work *work) {
         return;
     }
 
-    ret = iqs9151_read_frame(cfg, &frame);
+    /* Register writes requested since the last frame go in front of this
+     * frame's read, in the same transaction: the window is open now and a
+     * STOP would close it. A change takes effect from the very next report
+     * rather than halfway through the gesture that asked for it. */
+    struct iqs9151_pending pending = {.count = 0};
+    iqs9151_collect_requested_resolution(dev, &pending);
+    iqs9151_collect_requested_filter(dev, &pending);
+
+    ret = iqs9151_read_frame_with_writes(cfg, pending.writes, pending.count, &frame);
+    if (ret != 0 && pending.count > 0) {
+        /* The writes stay requested and ride with a later frame. The window
+         * may already be gone; one plain read is the most that can be tried. */
+        LOG_WRN("Register writes with the frame failed (%d); retrying next frame", ret);
+        ret = iqs9151_read_frame(cfg, &frame);
+        pending.count = 0;
+        pending.resolution = false;
+        pending.filter = false;
+    }
     if (ret != 0) {
         LOG_ERR("frame read failed (%d)", ret);
         (void)iqs9151_set_interrupt(dev, true);
         return;
     }
-
-    /* Inside the communication window, and before the frame is acted on, so a
-     * scale change takes effect from the very next report rather than halfway
-     * through the gesture that asked for it. */
-    iqs9151_apply_requested_resolution(dev);
-    iqs9151_apply_requested_filter(dev);
+    iqs9151_commit_pending(dev, &pending);
 
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_MOTION_TRACE)
     iqs9151_trace_frame(data, &frame, now_ms);
@@ -5037,9 +5135,9 @@ static int iqs9151_configure(const struct device *dev) {
 }
 
 /*
- * The device's low-speed filter block, requested from anywhere and written
- * from inside the communication window -- the same arrangement as the
- * resolution, for the same reason.
+ * The device's low-speed filter block, requested from anywhere and written in
+ * front of the next frame read, in that read's transaction -- the same
+ * arrangement as the resolution, for the same reason.
  *
  * Six values behind one generation counter rather than six counters, because
  * they only make sense together and because 0x11EA..0x11F0 is one contiguous
@@ -5060,8 +5158,8 @@ int iqs9151_request_filter(const struct iqs9151_filter_tune *tune) {
     return 0;
 }
 
-static void iqs9151_apply_requested_filter(const struct device *dev) {
-    const struct iqs9151_config *cfg = dev->config;
+static void iqs9151_collect_requested_filter(const struct device *dev,
+                                             struct iqs9151_pending *pending) {
     struct iqs9151_data *data = dev->data;
 
     const atomic_val_t generation = atomic_get(&iqs9151_filter_request_generation);
@@ -5076,44 +5174,55 @@ static void iqs9151_apply_requested_filter(const struct device *dev) {
 
     /* 0x11EA..0x11F1: the filter registers and, right after them, the
      * finger split factor, in one write. */
-    uint8_t block[8];
-    sys_put_le16(tune.bottom_speed, &block[0]);
-    sys_put_le16(tune.top_speed, &block[2]);
-    block[4] = tune.bottom_beta;
-    block[5] = tune.static_beta;
-    block[6] = tune.stationary_threshold;
-    block[7] = tune.finger_split;
+    struct iqs9151_pending_write *block = &pending->writes[pending->count++];
+    sys_put_le16(IQS9151_ADDR_XY_DYNAMIC_FILTER_BOTTOM_SPEED, &block->buf[0]);
+    sys_put_le16(tune.bottom_speed, &block->buf[2]);
+    sys_put_le16(tune.top_speed, &block->buf[4]);
+    block->buf[6] = tune.bottom_beta;
+    block->buf[7] = tune.static_beta;
+    block->buf[8] = tune.stationary_threshold;
+    block->buf[9] = tune.finger_split;
+    block->len = 10;
 
-    int ret = iqs9151_i2c_write(cfg, IQS9151_ADDR_XY_DYNAMIC_FILTER_BOTTOM_SPEED, block,
-                                sizeof(block));
-    if (ret != 0) {
-        LOG_WRN("Failed to apply filter block (%d), retrying next frame", ret);
-        return;
-    }
-
-    ret = iqs9151_i2c_write(cfg, IQS9151_ADDR_JITTER_FILTER_DELTA, &tune.jitter_delta, 1);
-    if (ret != 0) {
-        LOG_WRN("Failed to apply jitter delta (%d), retrying next frame", ret);
-        return;
-    }
+    struct iqs9151_pending_write *jitter = &pending->writes[pending->count++];
+    sys_put_le16(IQS9151_ADDR_JITTER_FILTER_DELTA, &jitter->buf[0]);
+    jitter->buf[2] = tune.jitter_delta;
+    jitter->len = 3;
 
     /* The touch thresholds, adjacent bytes; 0 means "leave the register". */
     if (tune.touch_set != 0U && tune.touch_clear != 0U) {
-        const uint8_t thresholds[2] = {tune.touch_set, tune.touch_clear};
-        ret = iqs9151_i2c_write(cfg, IQS9151_ADDR_TOUCH_SET_THRESHOLD, thresholds,
-                                sizeof(thresholds));
-        if (ret != 0) {
-            LOG_WRN("Failed to apply touch thresholds (%d), retrying next frame", ret);
-            return;
-        }
+        struct iqs9151_pending_write *thresholds = &pending->writes[pending->count++];
+        sys_put_le16(IQS9151_ADDR_TOUCH_SET_THRESHOLD, &thresholds->buf[0]);
+        thresholds->buf[2] = tune.touch_set;
+        thresholds->buf[3] = tune.touch_clear;
+        thresholds->len = 4;
     }
 
-    atomic_set(&data->filter_generation, generation);
-    LOG_INF("Trackpad filter: speed %u..%u, beta %u/%u, stationary %u, jitter %u, touch %u/%u, "
-            "split %u",
-            tune.bottom_speed, tune.top_speed, tune.bottom_beta, tune.static_beta,
-            tune.stationary_threshold, tune.jitter_delta, tune.touch_set, tune.touch_clear,
-            tune.finger_split);
+    pending->filter = true;
+    pending->filter_generation = generation;
+    pending->tune = tune;
+}
+
+/* After the transaction that carried the writes succeeded: claim the
+ * generations, so the next frame does not write the same values again. */
+static void iqs9151_commit_pending(const struct device *dev, const struct iqs9151_pending *pending) {
+    struct iqs9151_data *data = dev->data;
+
+    if (pending->resolution) {
+        atomic_set(&data->resolution_generation, pending->resolution_generation);
+        LOG_INF("Trackpad resolution set to %u x %u", pending->x_resolution,
+                pending->y_resolution);
+    }
+    if (pending->filter) {
+        const struct iqs9151_filter_tune *tune = &pending->tune;
+
+        atomic_set(&data->filter_generation, pending->filter_generation);
+        LOG_INF("Trackpad filter: speed %u..%u, beta %u/%u, stationary %u, jitter %u, touch "
+                "%u/%u, split %u",
+                tune->bottom_speed, tune->top_speed, tune->bottom_beta, tune->static_beta,
+                tune->stationary_threshold, tune->jitter_delta, tune->touch_set,
+                tune->touch_clear, tune->finger_split);
+    }
 }
 
 static const struct iqs9151_filter_tune iqs9151_kconfig_filter = {
@@ -5242,8 +5351,8 @@ static int iqs9151_apply_kconfig_overrides(const struct device *dev) {
 }
 
 /*
- * The runtime coordinate scale: requested from anywhere, written from inside
- * the IC's own communication window.
+ * The runtime coordinate scale: requested from anywhere, written in front of
+ * the next frame read, inside the IC's own communication window.
  *
  * One pair for the whole half rather than one per device, because the pair is
  * a statement about a pad shape and every IQS9151 on a half is the same pad.
@@ -5267,13 +5376,13 @@ int iqs9151_request_resolution(uint16_t x_resolution, uint16_t y_resolution) {
 }
 
 /*
- * Called from the frame work, which runs on RDY - so the device is listening.
- * A failed write leaves the generation unclaimed, and the next frame tries
- * again; that is the right answer for a single dropped I2C transfer and costs
- * nothing when there is no request outstanding.
+ * Called from the frame work, which runs on RDY, to put the write in front of
+ * the frame read (see iqs9151_read_frame_with_writes). The generation is
+ * claimed only once that transaction has succeeded, so a dropped transfer is
+ * tried again with the next frame, and an outstanding request costs nothing.
  */
-static void iqs9151_apply_requested_resolution(const struct device *dev) {
-    const struct iqs9151_config *cfg = dev->config;
+static void iqs9151_collect_requested_resolution(const struct device *dev,
+                                                 struct iqs9151_pending *pending) {
     struct iqs9151_data *data = dev->data;
 
     const atomic_val_t generation = atomic_get(&iqs9151_resolution_request_generation);
@@ -5284,20 +5393,17 @@ static void iqs9151_apply_requested_resolution(const struct device *dev) {
     const uint16_t x_resolution = (uint16_t)atomic_get(&iqs9151_requested_resolution_x);
     const uint16_t y_resolution = (uint16_t)atomic_get(&iqs9151_requested_resolution_y);
 
-    int ret = iqs9151_write_u16(cfg, IQS9151_ADDR_X_RESOLUTION, x_resolution);
-    if (ret != 0) {
-        LOG_WRN("Failed to apply X resolution %u (%d), retrying next frame", x_resolution, ret);
-        return;
-    }
+    /* X at 0x11E6 and Y right after it at 0x11E8: one four-byte write. */
+    struct iqs9151_pending_write *write = &pending->writes[pending->count++];
+    sys_put_le16(IQS9151_ADDR_X_RESOLUTION, &write->buf[0]);
+    sys_put_le16(x_resolution, &write->buf[2]);
+    sys_put_le16(y_resolution, &write->buf[4]);
+    write->len = 6;
 
-    ret = iqs9151_write_u16(cfg, IQS9151_ADDR_Y_RESOLUTION, y_resolution);
-    if (ret != 0) {
-        LOG_WRN("Failed to apply Y resolution %u (%d), retrying next frame", y_resolution, ret);
-        return;
-    }
-
-    atomic_set(&data->resolution_generation, generation);
-    LOG_INF("Trackpad resolution set to %u x %u", x_resolution, y_resolution);
+    pending->resolution = true;
+    pending->resolution_generation = generation;
+    pending->x_resolution = x_resolution;
+    pending->y_resolution = y_resolution;
 }
 
 /*
