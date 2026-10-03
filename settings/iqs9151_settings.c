@@ -96,6 +96,15 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
     ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
     ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_INT32(1, 1000));
 
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_2F_SWIPE_ENABLE)
+ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
+    iqs9151_swipe2_threshold, IQS9151_SETTINGS_SUBSYSTEM_ID,
+    IQS9151_SETTING_SWIPE2_THRESHOLD_KEY, ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+    ZMK_CUSTOM_SETTING_VALUE_INT32(CONFIG_INPUT_IQS9151_2F_SWIPE_THRESHOLD),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_INT32(1, 1000));
+#endif
+
 /*
  * The pad's coordinate scale, as two numbers the owner can move.
  *
@@ -457,6 +466,15 @@ static void apply_cursor_gain(void) {
     if (ret < 0) {
         LOG_WRN("Refused swipe threshold %d / %d (%d)", swipe_x, swipe_y, ret);
     }
+
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_2F_SWIPE_ENABLE)
+    const int32_t swipe2 = read_int32(IQS9151_SETTING_SWIPE2_THRESHOLD_KEY,
+                                      CONFIG_INPUT_IQS9151_2F_SWIPE_THRESHOLD);
+    ret = iqs9151_set_swipe2_threshold((uint16_t)swipe2);
+    if (ret < 0) {
+        LOG_WRN("Refused two-finger swipe threshold %d (%d)", swipe2, ret);
+    }
+#endif
 }
 
 static void apply_filter(void) {
@@ -552,7 +570,8 @@ static int iqs9151_settings_event_listener(const zmk_event_t *eh) {
                strcmp(changed->setting->key, IQS9151_SETTING_RIPPLE_MAP_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_CURSOR_REPORT_INTERVAL_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_SWIPE3_THRESHOLD_X_KEY) == 0 ||
-               strcmp(changed->setting->key, IQS9151_SETTING_SWIPE3_THRESHOLD_Y_KEY) == 0) {
+               strcmp(changed->setting->key, IQS9151_SETTING_SWIPE3_THRESHOLD_Y_KEY) == 0 ||
+               strcmp(changed->setting->key, IQS9151_SETTING_SWIPE2_THRESHOLD_KEY) == 0) {
         apply_cursor_gain();
     } else if (strncmp(changed->setting->key, "filter_", 7) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_STATIONARY_THRESHOLD_KEY) == 0 ||

@@ -147,6 +147,14 @@ int iqs9151_set_cursor_report_interval(uint16_t ms);
 int iqs9151_set_swipe3_threshold(uint16_t x_counts, uint16_t y_counts);
 
 /**
+ * How far two fingers must travel sideways before the movement is a
+ * horizontal swipe, in counts. Only matters while the swipe is on.
+ *
+ * @retval 0 on success, -EINVAL if zero.
+ */
+int iqs9151_set_swipe2_threshold(uint16_t counts);
+
+/**
  * Let the driver find each axis's ripple period by itself.
  *
  * A bank of candidate periods learns alongside the equaliser and the one

@@ -203,6 +203,10 @@ LOG_MODULE_REGISTER(iqs9151, CONFIG_INPUT_IQS9151_LOG_LEVEL);
 #define TWO_FINGER_SWIPE_THRESHOLD CONFIG_INPUT_IQS9151_2F_SWIPE_THRESHOLD
 #define TWO_FINGER_SWIPE_DOMINANCE_X10 CONFIG_INPUT_IQS9151_2F_SWIPE_DOMINANCE_X10
 
+/* The swipe distance at run time (iqs9151_set_swipe2_threshold); the Kconfig
+ * value is only where it starts. */
+static atomic_t iqs9151_swipe2_threshold = ATOMIC_INIT(TWO_FINGER_SWIPE_THRESHOLD);
+
 /*
  * Keeping a scroll on one axis once it has picked one.
  *
@@ -1831,7 +1835,8 @@ static void iqs9151_two_finger_update(struct iqs9151_data *data,
                 iqs9151_setting_swipe2_allowed() &&
                 ((int64_t)abs_dy * 10 > (int64_t)abs_dx * TWO_FINGER_SWIPE_DOMINANCE_X10);
 
-            if (sideways && abs_dy >= TWO_FINGER_SWIPE_THRESHOLD) {
+            if (sideways &&
+                abs_dy >= (int32_t)atomic_get(&iqs9151_swipe2_threshold)) {
                 const int32_t swipe = IQS9151_SWIPE_SIGN_Y * state->centroid_dy;
 
                 state->mode = IQS9151_2F_MODE_SWIPE;
@@ -1846,8 +1851,16 @@ static void iqs9151_two_finger_update(struct iqs9151_data *data,
                  * user means as vertical arrives as a diagonal -- and letting
                  * both axes through for the whole gesture is what makes the
                  * page drift sideways while they scroll down.
+                 *
+                 * Only while the horizontal swipe is on. With the swipe on, a
+                 * sideways movement is a gesture and a scroll is meant to be
+                 * vertical, so a crooked start should not drag the page
+                 * sideways. With it off, sideways scrolling is wanted, and a
+                 * diagonal one is too: both axes pass through as they came.
                  */
-                const int64_t lock = TWO_FINGER_SCROLL_AXIS_LOCK_X10;
+                const bool swipe_on = IS_ENABLED(CONFIG_INPUT_IQS9151_2F_SWIPE_ENABLE) &&
+                                      iqs9151_setting_swipe2_allowed();
+                const int64_t lock = swipe_on ? TWO_FINGER_SCROLL_AXIS_LOCK_X10 : 0;
 
                 state->scroll_lock_x =
                     lock > 0 && (int64_t)abs_dx * 10 >= (int64_t)abs_dy * lock;
@@ -2034,6 +2047,14 @@ static void iqs9151_three_finger_reset(struct iqs9151_data *data) {
 
 static atomic_t iqs9151_swipe3_threshold_x = ATOMIC_INIT(THREE_FINGER_SWIPE_THRESHOLD_X);
 static atomic_t iqs9151_swipe3_threshold_y = ATOMIC_INIT(THREE_FINGER_SWIPE_THRESHOLD_Y);
+
+int iqs9151_set_swipe2_threshold(uint16_t counts) {
+    if (counts == 0U) {
+        return -EINVAL;
+    }
+    atomic_set(&iqs9151_swipe2_threshold, (atomic_val_t)counts);
+    return 0;
+}
 
 int iqs9151_set_swipe3_threshold(uint16_t x_counts, uint16_t y_counts) {
     if (x_counts == 0U || y_counts == 0U) {

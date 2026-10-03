@@ -890,6 +890,13 @@ config INPUT_IQS9151_2F_SCROLL_AXIS_LOCK_X10
       12 means "1.2x the other", which is everything within roughly 40 degrees
       of straight. 0 disables it and both axes pass through as they always did.
 
+      Only applies while the two-finger horizontal swipe is on (the build
+      switch below and, at run time, the per-layer setting). With the swipe
+      on, a sideways movement is a gesture and a scroll is meant to be
+      vertical, so a crooked start should not drag the page sideways. With
+      the swipe off, sideways and diagonal scrolling are wanted, and the lock
+      is out of the way.
+
       A trackpad in a keyboard is not always approached square-on. Reaching for
       it from the home row puts the hand at an angle, and then "straight up" is
       a diagonal as far as the pad is concerned -- so a scroll meant as vertical
@@ -906,7 +913,8 @@ config INPUT_IQS9151_2F_SWIPE_THRESHOLD
     default 200
     help
       How far sideways the two fingers must travel before the swipe is
-      reported.
+      reported. The starting value; the runtime setting swipe2_threshold
+      changes it from the app.
 
 config INPUT_IQS9151_2F_SWIPE_DOMINANCE_X10
     int "IQS9151 how sideways a two-finger swipe must be (tenths)"

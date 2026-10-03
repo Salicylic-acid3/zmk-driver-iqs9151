@@ -137,6 +137,8 @@
 /* Three-finger swipe thresholds per sensor axis, in counts. */
 #define IQS9151_SETTING_SWIPE3_THRESHOLD_X_KEY "swipe3_threshold_x"
 #define IQS9151_SETTING_SWIPE3_THRESHOLD_Y_KEY "swipe3_threshold_y"
+/* Two-finger horizontal swipe distance, in counts (sensor Y). */
+#define IQS9151_SETTING_SWIPE2_THRESHOLD_KEY "swipe2_threshold"
 
 /*
  * The device's own low-speed filter block, one key per register. See
