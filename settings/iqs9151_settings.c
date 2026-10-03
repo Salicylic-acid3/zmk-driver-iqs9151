@@ -96,6 +96,29 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
     ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
     ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_INT32(1, 1000));
 
+/* The single-finger tap, three settings: the switch, and the two limits a
+ * touch must stay within to be one. */
+ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
+    iqs9151_tap1_enable, IQS9151_SETTINGS_SUBSYSTEM_ID, IQS9151_SETTING_TAP1_ENABLE_KEY,
+    ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL,
+    ZMK_CUSTOM_SETTING_VALUE_BOOL(IS_ENABLED(CONFIG_INPUT_IQS9151_1F_TAP_ENABLE)),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
+    iqs9151_tap1_max_ms, IQS9151_SETTINGS_SUBSYSTEM_ID, IQS9151_SETTING_TAP1_MAX_MS_KEY,
+    ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+    ZMK_CUSTOM_SETTING_VALUE_INT32(CONFIG_INPUT_IQS9151_1F_TAP_MAX_MS),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_INT32(1, 1000));
+
+ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
+    iqs9151_tap1_move, IQS9151_SETTINGS_SUBSYSTEM_ID, IQS9151_SETTING_TAP1_MOVE_KEY,
+    ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+    ZMK_CUSTOM_SETTING_VALUE_INT32(CONFIG_INPUT_IQS9151_1F_TAP_MOVE),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE, ZMK_CUSTOM_SETTING_RANGE_INT32(1, 1000));
+
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_2F_SWIPE_ENABLE)
 ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(
     iqs9151_swipe2_threshold, IQS9151_SETTINGS_SUBSYSTEM_ID,
@@ -475,6 +498,17 @@ static void apply_cursor_gain(void) {
         LOG_WRN("Refused two-finger swipe threshold %d (%d)", swipe2, ret);
     }
 #endif
+
+    const bool tap1_on = read_bool(IQS9151_SETTING_TAP1_ENABLE_KEY,
+                                   IS_ENABLED(CONFIG_INPUT_IQS9151_1F_TAP_ENABLE));
+    const int32_t tap1_ms = read_int32(IQS9151_SETTING_TAP1_MAX_MS_KEY,
+                                       CONFIG_INPUT_IQS9151_1F_TAP_MAX_MS);
+    const int32_t tap1_move = read_int32(IQS9151_SETTING_TAP1_MOVE_KEY,
+                                         CONFIG_INPUT_IQS9151_1F_TAP_MOVE);
+    ret = iqs9151_set_tap1(tap1_on, (uint16_t)tap1_ms, (uint16_t)tap1_move);
+    if (ret < 0) {
+        LOG_WRN("Refused single-finger tap settings %d ms / %d (%d)", tap1_ms, tap1_move, ret);
+    }
 }
 
 static void apply_filter(void) {
@@ -571,7 +605,10 @@ static int iqs9151_settings_event_listener(const zmk_event_t *eh) {
                strcmp(changed->setting->key, IQS9151_SETTING_CURSOR_REPORT_INTERVAL_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_SWIPE3_THRESHOLD_X_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_SWIPE3_THRESHOLD_Y_KEY) == 0 ||
-               strcmp(changed->setting->key, IQS9151_SETTING_SWIPE2_THRESHOLD_KEY) == 0) {
+               strcmp(changed->setting->key, IQS9151_SETTING_SWIPE2_THRESHOLD_KEY) == 0 ||
+               strcmp(changed->setting->key, IQS9151_SETTING_TAP1_ENABLE_KEY) == 0 ||
+               strcmp(changed->setting->key, IQS9151_SETTING_TAP1_MAX_MS_KEY) == 0 ||
+               strcmp(changed->setting->key, IQS9151_SETTING_TAP1_MOVE_KEY) == 0) {
         apply_cursor_gain();
     } else if (strncmp(changed->setting->key, "filter_", 7) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_STATIONARY_THRESHOLD_KEY) == 0 ||

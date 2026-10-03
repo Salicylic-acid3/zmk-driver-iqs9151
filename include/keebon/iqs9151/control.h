@@ -155,6 +155,15 @@ int iqs9151_set_swipe3_threshold(uint16_t x_counts, uint16_t y_counts);
 int iqs9151_set_swipe2_threshold(uint16_t counts);
 
 /**
+ * The single-finger tap: whether a quick touch clicks at all, how long the
+ * finger may stay down (ms) and how far it may move (counts) and still be a
+ * tap. Tighter numbers mean fewer accidental clicks from a brushed pad.
+ *
+ * @retval 0 on success, -EINVAL if a limit is zero.
+ */
+int iqs9151_set_tap1(bool enabled, uint16_t max_ms, uint16_t move_counts);
+
+/**
  * Let the driver find each axis's ripple period by itself.
  *
  * A bank of candidate periods learns alongside the equaliser and the one

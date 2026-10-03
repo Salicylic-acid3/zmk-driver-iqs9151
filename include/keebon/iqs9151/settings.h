@@ -139,6 +139,10 @@
 #define IQS9151_SETTING_SWIPE3_THRESHOLD_Y_KEY "swipe3_threshold_y"
 /* Two-finger horizontal swipe distance, in counts (sensor Y). */
 #define IQS9151_SETTING_SWIPE2_THRESHOLD_KEY "swipe2_threshold"
+/* Single-finger tap: on/off, longest touch (ms), largest movement (counts). */
+#define IQS9151_SETTING_TAP1_ENABLE_KEY "tap1_enable"
+#define IQS9151_SETTING_TAP1_MAX_MS_KEY "tap1_max_ms"
+#define IQS9151_SETTING_TAP1_MOVE_KEY "tap1_move"
 
 /*
  * The device's own low-speed filter block, one key per register. See

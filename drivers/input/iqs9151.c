@@ -104,6 +104,28 @@ struct iqs9151_pending {
 #define CURSOR_INERTIA_MIN_SAMPLES CONFIG_INPUT_IQS9151_CURSOR_INERTIA_MIN_SAMPLES
 #define CURSOR_INERTIA_MIN_AVG_SPEED CONFIG_INPUT_IQS9151_CURSOR_INERTIA_MIN_AVG_SPEED
 #define ONE_FINGER_TAP_MAX_MS CONFIG_INPUT_IQS9151_1F_TAP_MAX_MS
+
+/*
+ * The single-finger tap at run time: whether it clicks at all, how short the
+ * touch must be and how little it may move. The Kconfig values are where
+ * these start; iqs9151_set_tap1 moves them (the app's trackpad tab). A pad
+ * that is also where the hand rests between keys gets brushed, and every
+ * brush that fits the window is a click somewhere on the screen; tightening
+ * the window, or turning the tap off, is the owner's call.
+ */
+static atomic_t iqs9151_tap1_enabled = ATOMIC_INIT(IS_ENABLED(CONFIG_INPUT_IQS9151_1F_TAP_ENABLE));
+static atomic_t iqs9151_tap1_max_ms = ATOMIC_INIT(CONFIG_INPUT_IQS9151_1F_TAP_MAX_MS);
+static atomic_t iqs9151_tap1_move = ATOMIC_INIT(CONFIG_INPUT_IQS9151_1F_TAP_MOVE);
+
+int iqs9151_set_tap1(bool enabled, uint16_t max_ms, uint16_t move_counts) {
+    if (max_ms == 0U || move_counts == 0U) {
+        return -EINVAL;
+    }
+    atomic_set(&iqs9151_tap1_enabled, enabled ? 1 : 0);
+    atomic_set(&iqs9151_tap1_max_ms, (atomic_val_t)max_ms);
+    atomic_set(&iqs9151_tap1_move, (atomic_val_t)move_counts);
+    return 0;
+}
 #define TWO_FINGER_TAP_MAX_MS CONFIG_INPUT_IQS9151_2F_TAP_MAX_MS
 #define IQS9151_TAP_REENTRY_WINDOW_MS 30
 #define ONE_FINGER_TAPDRAG_GAP_MAX_MS CONFIG_INPUT_IQS9151_1F_TAPDRAG_GAP_MAX_MS
@@ -680,6 +702,11 @@ struct iqs9151_data {
      * current burst after a rest are still being held. */
     int64_t cursor_move_ms;
     uint8_t lift_guard_held;
+    /* Movement the lift guard held and then let through, paid out a share
+     * per report rather than in one lump (see iqs9151_report_cursor). */
+    int32_t lift_catchup_x;
+    int32_t lift_catchup_y;
+    uint8_t lift_catchup_reports;
     struct iqs9151_finger_history_entry finger_history[IQS9151_FINGER_HISTORY_SIZE];
     uint8_t finger_history_head;
     uint8_t finger_history_count;
@@ -1641,6 +1668,10 @@ static bool iqs9151_one_finger_update(struct iqs9151_data *data,
         return false;
     }
 
+    const bool tap1_enabled = atomic_get(&iqs9151_tap1_enabled) != 0;
+    const int64_t tap1_max_ms = (int64_t)atomic_get(&iqs9151_tap1_max_ms);
+    const int32_t tap1_move = (int32_t)atomic_get(&iqs9151_tap1_move);
+
     if (one_now) {
         const int64_t elapsed_ms = now_ms - state->down_ms;
 
@@ -1654,15 +1685,15 @@ static bool iqs9151_one_finger_update(struct iqs9151_data *data,
         }
 
         if (state->tap_candidate &&
-            (elapsed_ms > ONE_FINGER_TAP_MAX_MS ||
-             iqs9151_abs32(state->dx) > ONE_FINGER_TAP_MOVE ||
-             iqs9151_abs32(state->dy) > ONE_FINGER_TAP_MOVE)) {
+            (elapsed_ms > tap1_max_ms ||
+             iqs9151_abs32(state->dx) > tap1_move ||
+             iqs9151_abs32(state->dy) > tap1_move)) {
             state->tap_candidate = false;
         }
         if (state->tapdrag_second_touch && state->hold_candidate &&
-            (elapsed_ms > ONE_FINGER_TAP_MAX_MS ||
-             iqs9151_abs32(state->dx) > ONE_FINGER_TAP_MOVE ||
-             iqs9151_abs32(state->dy) > ONE_FINGER_TAP_MOVE)) {
+            (elapsed_ms > tap1_max_ms ||
+             iqs9151_abs32(state->dx) > tap1_move ||
+             iqs9151_abs32(state->dy) > tap1_move)) {
             state->hold_candidate = false;
         }
         return false;
@@ -1673,16 +1704,15 @@ static bool iqs9151_one_finger_update(struct iqs9151_data *data,
         const bool second_tap_detected =
             (frame->finger_count == 0U) &&
             state->hold_candidate &&
-            elapsed_ms <= ONE_FINGER_TAP_MAX_MS &&
-            iqs9151_abs32(state->dx) <= ONE_FINGER_TAP_MOVE &&
-            iqs9151_abs32(state->dy) <= ONE_FINGER_TAP_MOVE;
+            elapsed_ms <= tap1_max_ms &&
+            iqs9151_abs32(state->dx) <= tap1_move &&
+            iqs9151_abs32(state->dy) <= tap1_move;
 
         released_from_hold = state->hold_sent;
         if (state->hold_sent) {
             iqs9151_release_hold(data, dev);
         }
-        if (second_tap_detected &&
-            IS_ENABLED(CONFIG_INPUT_IQS9151_1F_TAP_ENABLE)) {
+        if (second_tap_detected && tap1_enabled) {
             (void)iqs9151_emit_click(data, dev, INPUT_BTN_0);
         }
         iqs9151_one_finger_reset(state);
@@ -1692,16 +1722,18 @@ static bool iqs9151_one_finger_update(struct iqs9151_data *data,
     if (frame->finger_count == 0U && state->tap_candidate) {
         const int64_t elapsed_ms = now_ms - state->down_ms;
 
-        if (elapsed_ms <= ONE_FINGER_TAP_MAX_MS &&
-            iqs9151_abs32(state->dx) <= ONE_FINGER_TAP_MOVE &&
-            iqs9151_abs32(state->dy) <= ONE_FINGER_TAP_MOVE) {
+        if (elapsed_ms <= tap1_max_ms &&
+            iqs9151_abs32(state->dx) <= tap1_move &&
+            iqs9151_abs32(state->dy) <= tap1_move) {
             tap_detected = true;
-            if (IS_ENABLED(CONFIG_INPUT_IQS9151_1F_PRESSHOLD_ENABLE)) {
+            /* Off means off: no click, and no press-and-hold waiting for a
+             * second touch either, since that starts with the same press. */
+            if (!tap1_enabled) {
+                tap_emitted = false;
+            } else if (IS_ENABLED(CONFIG_INPUT_IQS9151_1F_PRESSHOLD_ENABLE)) {
                 tap_emitted = iqs9151_emit_hold_press(data, dev, INPUT_BTN_0);
-            } else if (IS_ENABLED(CONFIG_INPUT_IQS9151_1F_TAP_ENABLE)) {
-                tap_emitted = iqs9151_emit_click(data, dev, INPUT_BTN_0);
             } else {
-                tap_emitted = true;
+                tap_emitted = iqs9151_emit_click(data, dev, INPUT_BTN_0);
             }
         }
     }
@@ -3056,6 +3088,8 @@ static inline bool iqs9151_host_link_backlogged(int64_t now_ms) {
 #endif
 
 static atomic_t iqs9151_lift_guard_frames = ATOMIC_INIT(CONFIG_INPUT_IQS9151_LIFT_GUARD_FRAMES);
+/* Over how many reports a released burst is paid out. */
+#define IQS9151_LIFT_CATCHUP_REPORTS 4
 
 int iqs9151_set_lift_guard(uint8_t frames) {
     atomic_set(&iqs9151_lift_guard_frames, (atomic_val_t)MIN(frames, 8U));
@@ -3130,11 +3164,36 @@ static void iqs9151_report_cursor(struct iqs9151_data *data, int32_t dx, int32_t
                                   int64_t now_ms, bool flush) {
     const struct device *dev = data->dev;
     const int64_t interval = (int64_t)atomic_get(&iqs9151_cursor_report_interval_ms);
+    const bool was_holding = !flush && iqs9151_lift_guard_holding(data);
 
     data->cursor_pending_x += dx;
     data->cursor_pending_y += dy;
     if (!flush && iqs9151_lift_guard_holds(data, now_ms)) {
         return;
+    }
+    /*
+     * The guard has just let a burst through as a stroke. What it held is
+     * not dumped into this report on top of this frame's movement -- that
+     * is a visible hop at the start of every stroke after a rest, and at
+     * every landing -- but paid out over the next few reports, a share
+     * each, so the stroke starts at the speed the finger is moving.
+     */
+    if (was_holding) {
+        data->lift_catchup_x = data->cursor_pending_x - dx;
+        data->lift_catchup_y = data->cursor_pending_y - dy;
+        data->lift_catchup_reports = IQS9151_LIFT_CATCHUP_REPORTS;
+        data->cursor_pending_x = dx;
+        data->cursor_pending_y = dy;
+    }
+    if (data->lift_catchup_reports != 0U) {
+        const int32_t share_x = data->lift_catchup_x / (int32_t)data->lift_catchup_reports;
+        const int32_t share_y = data->lift_catchup_y / (int32_t)data->lift_catchup_reports;
+
+        data->cursor_pending_x += share_x;
+        data->cursor_pending_y += share_y;
+        data->lift_catchup_x -= share_x;
+        data->lift_catchup_y -= share_y;
+        data->lift_catchup_reports--;
     }
     if (data->cursor_pending_x == 0 && data->cursor_pending_y == 0) {
         return;
@@ -3244,10 +3303,15 @@ static void iqs9151_process_frame(struct iqs9151_data *data,
      * itself usually carries no movement, and it is the one that sets the
      * zone's centre. */
     const bool in_landing_zone = iqs9151_in_landing_zone(data, frame, &prev_frame, now_ms);
+    /* The frame the finger lands on is not movement, whatever the relative
+     * registers say about it: a delta from wherever the device last saw a
+     * finger would send the pointer across the screen. The dead zone covers
+     * this when it is on; this holds when it is off. */
+    const bool landing_frame = prev_frame.finger_count == 0U && frame->finger_count == 1U;
     const bool cursor_moving = (frame->finger_count == 1U) &&
                                (((frame->trackpad_flags & IQS9151_TP_MOVEMENT_DETECTED) != 0U) ||
                                 frame->rel_x != 0 || frame->rel_y != 0) &&
-                               !in_landing_zone;
+                               !in_landing_zone && !landing_frame;
     bool released_from_hold;
     bool suppress_cursor_tail;
 
@@ -4682,6 +4746,9 @@ static void iqs9151_apply_cursor_gain(struct iqs9151_data *data, struct iqs9151_
          */
         data->cursor_gain_remainder_x = 0;
         data->cursor_gain_remainder_y = 0;
+        data->lift_catchup_x = 0;
+        data->lift_catchup_y = 0;
+        data->lift_catchup_reports = 0U;
         iqs9151_dist_smoother_reset(&data->dist_smoother_x);
         iqs9151_dist_smoother_reset(&data->dist_smoother_y);
         /* The equalisers keep what they learned; only the stroke state goes. */
@@ -5645,15 +5712,17 @@ static int iqs9151_bring_up(const struct device *dev) {
 }
 
 /*
- * Bring-up that did not get through at init, tried again from the recovery
- * thread.
+ * The bring-up, on the recovery thread: the first attempt right after init
+ * (so the rest of the system never waits for the pad), and retries after a
+ * failure.
  *
- * Init used to return the error, which leaves a device Zephyr considers
- * broken and nothing that will ever look at it again: the keys work, the pad
- * is dead until the half is power-cycled. That is the symptom on the wireless
- * half after deep sleep. A retry a second later, with the I2C bus clocked
- * clean first in case the IC was left holding SDA, costs nothing when it is
- * not needed and turns "power-cycle the half" into "wait a moment".
+ * Init used to do the first attempt itself and return the error on failure,
+ * which leaves a device Zephyr considers broken and nothing that will ever
+ * look at it again: the keys work, the pad is dead until the half is
+ * power-cycled. That is the symptom on the wireless half after deep sleep.
+ * A retry a second later, with the I2C bus clocked clean first in case the
+ * IC was left holding SDA, costs nothing when it is not needed and turns
+ * "power-cycle the half" into "wait a moment".
  *
  * Backs off (1, 2, 4, 8, 16 s) so a pad that is genuinely absent does not keep
  * the bus busy, and gives up after that with a message that says what to do.
@@ -5680,7 +5749,11 @@ static void iqs9151_bringup_work_handler(struct k_work *work) {
 
     ret = iqs9151_bring_up(dev);
     if (ret == 0) {
-        LOG_WRN("Trackpad came up on retry %u", data->bringup_attempts);
+        if (data->bringup_attempts > 1U) {
+            LOG_WRN("Trackpad came up on retry %u", data->bringup_attempts);
+        } else {
+            LOG_DBG("Trackpad up");
+        }
         return;
     }
 
@@ -5779,16 +5852,19 @@ static int iqs9151_init(const struct device *dev) {
         return -EIO;
     }
 
-    ret = iqs9151_bring_up(dev);
-    if (ret != 0) {
-        /* Not an init failure: the device stays registered and the recovery
-         * thread keeps trying. See iqs9151_bringup_work_handler. */
-        LOG_WRN("Trackpad bring-up failed at boot (%d); retrying shortly", ret);
-        iqs9151_schedule_bringup(data, K_MSEC(IQS9151_BRINGUP_FIRST_DELAY_MS));
-        return 0;
-    }
+    /*
+     * The bring-up itself runs on the recovery thread, not here. It is
+     * seconds of I2C with waits in it -- up to 1.5 s for a communication
+     * window when the IC kept its power and its event mode across an MCU
+     * reset (a wake from deep sleep, every time), the software reset, the
+     * settings blob, ATI -- and init runs before the rest of the system
+     * starts: the keys, Bluetooth and USB all waited for the pad. That was
+     * most of "the keyboard is slow to wake up". Now they start at once and
+     * the pad joins a moment later. See iqs9151_bringup_work_handler.
+     */
+    iqs9151_schedule_bringup(data, K_NO_WAIT);
 
-    LOG_DBG("Initialization complete");
+    LOG_DBG("Initialization complete; bring-up scheduled");
     return 0;
 }
 
