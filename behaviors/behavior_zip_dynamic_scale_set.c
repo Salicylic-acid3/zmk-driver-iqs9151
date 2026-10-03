@@ -33,9 +33,49 @@ static int behavior_zip_dynamic_scale_set_binding_released(struct zmk_behavior_b
     return 0;
 }
 
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
+
+/* See behavior_zip_dynamic_scale.c: without metadata Studio refuses the
+ * assignment. The value is the multiplier times ten, within the clamp the
+ * scaler itself applies. */
+static const struct behavior_parameter_value_metadata zds_set_group_values[] = {
+    {.display_name = "Cursor", .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE, .value = ZDS_XY},
+    {.display_name = "Scroll", .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE, .value = ZDS_SC},
+    {.display_name = "Cursor and scroll",
+     .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
+     .value = ZDS_ALL},
+};
+
+static const struct behavior_parameter_value_metadata zds_set_scale_values[] = {
+    {.display_name = "Speed x10 (10 = normal)",
+     .type = BEHAVIOR_PARAMETER_VALUE_TYPE_RANGE,
+     .range =
+         {
+             .min = CONFIG_ZMK_INPUT_PROCESSOR_DYNAMIC_SCALER_MIN_SCALE_X10,
+             .max = CONFIG_ZMK_INPUT_PROCESSOR_DYNAMIC_SCALER_MAX_SCALE_X10,
+         }},
+};
+
+static const struct behavior_parameter_metadata_set zds_set_metadata_set = {
+    .param1_values = zds_set_group_values,
+    .param1_values_len = ARRAY_SIZE(zds_set_group_values),
+    .param2_values = zds_set_scale_values,
+    .param2_values_len = ARRAY_SIZE(zds_set_scale_values),
+};
+
+static const struct behavior_parameter_metadata zds_set_metadata = {
+    .sets_len = 1,
+    .sets = &zds_set_metadata_set,
+};
+
+#endif /* IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA) */
+
 static const struct behavior_driver_api behavior_zip_dynamic_scale_set_driver_api = {
     .binding_pressed = behavior_zip_dynamic_scale_set_binding_pressed,
     .binding_released = behavior_zip_dynamic_scale_set_binding_released,
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
+    .parameter_metadata = &zds_set_metadata,
+#endif
 };
 
 #define ZIP_DYN_SCALE_SET_INST(n)                                                                  \

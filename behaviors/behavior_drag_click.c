@@ -239,9 +239,17 @@ static int drag_click_init(const struct device *dev) {
     return 0;
 }
 
+/* No parameters, and Studio has to be told so: a behavior whose driver
+ * offers no parameter metadata fails zmk_behavior_validate_binding() with
+ * -ENODEV, and the keymap RPC turns that into INVALID_PARAMETERS. The app
+ * then reports that the keyboard refused the assignment, which is how
+ * putting &drag_lclk back on a key after changing it to &mkp used to fail. */
 static const struct behavior_driver_api drag_click_driver_api = {
     .binding_pressed = drag_click_pressed,
     .binding_released = drag_click_released,
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
+    .get_parameter_metadata = zmk_behavior_get_empty_param_metadata,
+#endif
 };
 
 #define DRAG_CLICK_INST(n)                                                                         \
