@@ -706,10 +706,11 @@ struct iqs9151_data {
     int64_t cursor_move_ms;
     uint8_t lift_guard_held;
     /* The two-finger horizontal swipe is allowed only on a touch that began
-     * with nothing on the pad. Set by a frame with no fingers, cleared when a
-     * scroll or pinch starts, so sideways movement right after a vertical
-     * scroll -- fingers still down, or lifted for one flickering frame -- is
-     * neither a swipe nor a sideways scroll. See iqs9151_two_finger_update. */
+     * with nothing on the pad. Set by a frame with no fingers (in
+     * iqs9151_process_frame), cleared when a scroll or pinch starts, so
+     * sideways movement right after a vertical scroll -- fingers still down,
+     * or lifted for one flickering frame -- is neither a swipe nor a sideways
+     * scroll. */
     bool swipe2_armed;
     /* Movement the lift guard held and then let through, paid out a share
      * per report rather than in one lump (see iqs9151_report_cursor). */
@@ -1784,10 +1785,6 @@ static void iqs9151_two_finger_update(struct iqs9151_data *data,
 
     iqs9151_two_finger_result_reset(result);
 
-    if (frame->finger_count == 0U) {
-        data->swipe2_armed = true;
-    }
-
     if (!state->active && two_now) {
         bool tapdrag_second_touch = false;
 
@@ -1927,8 +1924,11 @@ static void iqs9151_two_finger_update(struct iqs9151_data *data,
                  * swipe off, sideways and diagonal scrolling are wanted and
                  * both axes pass through as they came.
                  */
-                state->scroll_lock_x = false;
-                state->scroll_lock_y = swipe_on;
+                /* "Vertical" on the screen is the sensor's X axis (the long
+                 * side; the listener swaps XY), so the scroll settles on X
+                 * and the sensor's Y -- the screen's horizontal -- is dropped. */
+                state->scroll_lock_x = swipe_on;
+                state->scroll_lock_y = false;
                 state->mode = IQS9151_2F_MODE_SCROLL;
                 result->scroll_started = true;
                 state->tap_candidate = false;
@@ -3317,6 +3317,13 @@ static void iqs9151_process_frame(struct iqs9151_data *data,
      * finger would send the pointer across the screen. The dead zone covers
      * this when it is on; this holds when it is off. */
     const bool landing_frame = prev_frame.finger_count == 0U && frame->finger_count == 1U;
+    /* Every empty frame, seen here rather than in the two-finger code, which
+     * only runs while a two-finger session is open: fingers that leave one
+     * at a time end that session on the one-finger frame, and the empty
+     * frame after it would never have re-armed the swipe. */
+    if (frame->finger_count == 0U) {
+        data->swipe2_armed = true;
+    }
     const bool cursor_moving = (frame->finger_count == 1U) &&
                                (((frame->trackpad_flags & IQS9151_TP_MOVEMENT_DETECTED) != 0U) ||
                                 frame->rel_x != 0 || frame->rel_y != 0) &&
