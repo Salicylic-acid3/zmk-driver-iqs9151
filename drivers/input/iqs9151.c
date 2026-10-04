@@ -1441,12 +1441,21 @@ static void iqs9151_inertia_cancel(struct iqs9151_inertia_state *state,
     k_work_cancel_delayable(work);
 }
 
+/*
+ * The release waits for the queue like the press did (K_FOREVER in
+ * iqs9151_emit_hold_press). It used to be K_NO_WAIT, and ZMK counts mouse
+ * button presses: a release the queue refused -- and the lift is the busiest
+ * moment, with the cursor flush, the touch state and the inertia all queued
+ * at once -- left the count at one and the button down at the host for good.
+ * Seen as a drag that no lift would end. hold_button was cleared regardless,
+ * so nothing ever tried again.
+ */
 static void iqs9151_release_hold(struct iqs9151_data *data, const struct device *dev) {
     if (data->hold_button == 0U) {
         return;
     }
 
-    iqs9151_report_key_event(dev, data->hold_button, false, true, K_NO_WAIT);
+    iqs9151_report_key_event(dev, data->hold_button, false, true, K_FOREVER);
     data->hold_button = 0U;
 }
 
