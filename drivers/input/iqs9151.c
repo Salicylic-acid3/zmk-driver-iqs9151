@@ -649,6 +649,10 @@ struct iqs9151_data {
     struct k_work work;
     struct k_work_delayable one_finger_click_work;
     struct k_work_delayable two_finger_click_work;
+    /* Re-sends a touch state report the input queue refused; see
+     * iqs9151_set_touch_state. */
+    struct k_work_delayable touch_state_work;
+    uint8_t touch_state_want;
     struct k_work_delayable three_finger_click_work;
     struct k_work_delayable inertia_scroll_work;
     struct k_work_delayable inertia_cursor_work;
@@ -2718,6 +2722,17 @@ static int iqs9151_read_frame_with_writes(const struct iqs9151_config *cfg,
  * leaving the two halves disagreeing about whether the pad is being touched.
  */
 #define IQS9151_TOUCH_STATE_TIMEOUT K_MSEC(10)
+/*
+ * "Retried on the next frame" is not enough on its own. In event mode the
+ * pad is silent once the last finger has left: the frame that says
+ * finger_count == 0 is the last one until something touches it again. A
+ * release report refused there would never be retried, and everything that
+ * follows the touch state -- the drag click holding its button for the
+ * finger, a key held while a finger is on the pad -- would stay held with
+ * nothing on the pad, until the next touch and lift. So a refused report is
+ * also retried from a timer, until it goes through.
+ */
+#define IQS9151_TOUCH_STATE_RETRY K_MSEC(5)
 
 /*
  * Report a plain "a finger is on the pad" key event, independent of any gesture
@@ -2729,6 +2744,11 @@ static int iqs9151_read_frame_with_writes(const struct iqs9151_config *cfg,
 static void iqs9151_set_touch_state(struct iqs9151_data *data, uint8_t finger_count) {
     const bool touched = (finger_count > 0U);
     const bool multi = (finger_count >= 2U);
+    bool retry = false;
+
+    /* Always the latest count: a retry that fires after a newer frame must
+     * report that frame's state, not the one that was refused. */
+    data->touch_state_want = finger_count;
 
     if (data->touch_state_sent != touched) {
         int ret = iqs9151_report_key_event(data->dev,
@@ -2737,7 +2757,8 @@ static void iqs9151_set_touch_state(struct iqs9151_data *data, uint8_t finger_co
         if (ret == 0) {
             data->touch_state_sent = touched;
         } else {
-            LOG_WRN("Touch state report dropped (%d), retrying on the next frame", ret);
+            LOG_WRN("Touch state report dropped (%d), retrying", ret);
+            retry = true;
         }
     }
 
@@ -2748,15 +2769,29 @@ static void iqs9151_set_touch_state(struct iqs9151_data *data, uint8_t finger_co
         if (ret == 0) {
             data->touch_state_2f_sent = multi;
         } else {
-            LOG_WRN("Two-finger touch state report dropped (%d), retrying on the next frame", ret);
+            LOG_WRN("Two-finger touch state report dropped (%d), retrying", ret);
+            retry = true;
         }
     }
+
+    if (retry) {
+        k_work_reschedule(&data->touch_state_work, IQS9151_TOUCH_STATE_RETRY);
+    }
+}
+
+static void iqs9151_touch_state_work_cb(struct k_work *work) {
+    struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+    struct iqs9151_data *data = CONTAINER_OF(dwork, struct iqs9151_data, touch_state_work);
+
+    iqs9151_set_touch_state(data, data->touch_state_want);
 }
 #else
 static inline void iqs9151_set_touch_state(struct iqs9151_data *data, uint8_t finger_count) {
     ARG_UNUSED(data);
     ARG_UNUSED(finger_count);
 }
+
+static void iqs9151_touch_state_work_cb(struct k_work *work) { ARG_UNUSED(work); }
 #endif
 
 /* Defined next to init, which is where everything it needs to redo lives. */
@@ -5837,6 +5872,7 @@ static int iqs9151_init(const struct device *dev) {
 
     // Setup IRQ Call Back
     k_work_init(&data->work, iqs9151_work_cb);
+    k_work_init_delayable(&data->touch_state_work, iqs9151_touch_state_work_cb);
     k_work_init_delayable(&data->one_finger_click_work, iqs9151_one_finger_click_work_cb);
     k_work_init_delayable(&data->two_finger_click_work, iqs9151_two_finger_click_work_cb);
     k_work_init_delayable(&data->three_finger_click_work, iqs9151_three_finger_click_work_cb);
@@ -5898,6 +5934,7 @@ void iqs9151_test_context_init(void *ctx, const struct device *dev) {
     k_work_init_delayable(&data->recover_work, iqs9151_recover_work_handler);
     k_work_init(&data->map_save_work, iqs9151_map_save_work_handler);
     k_work_init(&data->work, iqs9151_work_cb);
+    k_work_init_delayable(&data->touch_state_work, iqs9151_touch_state_work_cb);
     k_work_init_delayable(&data->one_finger_click_work, iqs9151_one_finger_click_work_cb);
     k_work_init_delayable(&data->two_finger_click_work, iqs9151_two_finger_click_work_cb);
     k_work_init_delayable(&data->three_finger_click_work, iqs9151_three_finger_click_work_cb);
@@ -5931,6 +5968,7 @@ void iqs9151_test_cancel_pending_work(void *ctx) {
     (void)k_work_cancel_delayable(&data->three_finger_click_work);
     (void)k_work_cancel_delayable(&data->inertia_scroll_work);
     (void)k_work_cancel_delayable(&data->inertia_cursor_work);
+    (void)k_work_cancel_delayable(&data->touch_state_work);
     (void)k_work_cancel(&data->work);
 }
 
