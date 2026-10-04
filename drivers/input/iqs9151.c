@@ -272,6 +272,9 @@ static atomic_t iqs9151_swipe2_threshold = ATOMIC_INIT(TWO_FINGER_SWIPE_THRESHOL
  * is a resolution question, not a gesture one; see the note on
  * INPUT_IQS9151_RESOLUTION_X.
  */
+/* Kept for the Kconfig's sake; the scroll axis is no longer a ratio. With
+ * the horizontal swipe on a scroll is vertical, with it off both axes pass
+ * (see the scroll start in iqs9151_two_finger_update). */
 #define TWO_FINGER_SCROLL_AXIS_LOCK_X10 CONFIG_INPUT_IQS9151_2F_SCROLL_AXIS_LOCK_X10
 
 /*
@@ -702,6 +705,12 @@ struct iqs9151_data {
      * current burst after a rest are still being held. */
     int64_t cursor_move_ms;
     uint8_t lift_guard_held;
+    /* The two-finger horizontal swipe is allowed only on a touch that began
+     * with nothing on the pad. Set by a frame with no fingers, cleared when a
+     * scroll or pinch starts, so sideways movement right after a vertical
+     * scroll -- fingers still down, or lifted for one flickering frame -- is
+     * neither a swipe nor a sideways scroll. See iqs9151_two_finger_update. */
+    bool swipe2_armed;
     /* Movement the lift guard held and then let through, paid out a share
      * per report rather than in one lump (see iqs9151_report_cursor). */
     int32_t lift_catchup_x;
@@ -1775,6 +1784,10 @@ static void iqs9151_two_finger_update(struct iqs9151_data *data,
 
     iqs9151_two_finger_result_reset(result);
 
+    if (frame->finger_count == 0U) {
+        data->swipe2_armed = true;
+    }
+
     if (!state->active && two_now) {
         bool tapdrag_second_touch = false;
 
@@ -1886,9 +1899,10 @@ static void iqs9151_two_finger_update(struct iqs9151_data *data,
              * out to be vertical after all stops being sideways-dominant and
              * scrolls as usual.
              */
+            const bool swipe_on = IS_ENABLED(CONFIG_INPUT_IQS9151_2F_SWIPE_ENABLE) &&
+                                  iqs9151_setting_swipe2_allowed();
             const bool sideways =
-                IS_ENABLED(CONFIG_INPUT_IQS9151_2F_SWIPE_ENABLE) &&
-                iqs9151_setting_swipe2_allowed() &&
+                swipe_on && data->swipe2_armed &&
                 ((int64_t)abs_dy * 10 > (int64_t)abs_dx * TWO_FINGER_SWIPE_DOMINANCE_X10);
 
             if (sideways &&
@@ -1902,29 +1916,23 @@ static void iqs9151_two_finger_update(struct iqs9151_data *data,
             } else if (scroll_enabled && !sideways &&
                        abs_center >= TWO_FINGER_SCROLL_START_MOVE) {
                 /*
-                 * Pick the axis now, once, and keep it. A hand reaching across
-                 * from the home row meets the pad at an angle, so a scroll the
-                 * user means as vertical arrives as a diagonal -- and letting
-                 * both axes through for the whole gesture is what makes the
-                 * page drift sideways while they scroll down.
-                 *
-                 * Only while the horizontal swipe is on. With the swipe on, a
-                 * sideways movement is a gesture and a scroll is meant to be
-                 * vertical, so a crooked start should not drag the page
-                 * sideways. With it off, sideways scrolling is wanted, and a
-                 * diagonal one is too: both axes pass through as they came.
+                 * With the horizontal swipe on, a scroll is vertical and
+                 * nothing else: sideways movement on that layer is either a
+                 * swipe, decided above from a fresh touch, or nothing. A
+                 * scroll that starts at an angle (a hand reaching across from
+                 * the home row) therefore cannot drift the page sideways, and
+                 * neither can sideways movement after a vertical scroll
+                 * while the fingers are still down -- which is also why the
+                 * swipe is not re-armed until every finger has left. With the
+                 * swipe off, sideways and diagonal scrolling are wanted and
+                 * both axes pass through as they came.
                  */
-                const bool swipe_on = IS_ENABLED(CONFIG_INPUT_IQS9151_2F_SWIPE_ENABLE) &&
-                                      iqs9151_setting_swipe2_allowed();
-                const int64_t lock = swipe_on ? TWO_FINGER_SCROLL_AXIS_LOCK_X10 : 0;
-
-                state->scroll_lock_x =
-                    lock > 0 && (int64_t)abs_dx * 10 >= (int64_t)abs_dy * lock;
-                state->scroll_lock_y =
-                    lock > 0 && (int64_t)abs_dy * 10 >= (int64_t)abs_dx * lock;
+                state->scroll_lock_x = false;
+                state->scroll_lock_y = swipe_on;
                 state->mode = IQS9151_2F_MODE_SCROLL;
                 result->scroll_started = true;
                 state->tap_candidate = false;
+                data->swipe2_armed = false;
             } else if (state->pinch_enabled &&
                        abs_dist >= TWO_FINGER_PINCH_START_DISTANCE &&
                        (int64_t)abs_dist * 10 >
@@ -1932,6 +1940,7 @@ static void iqs9151_two_finger_update(struct iqs9151_data *data,
                 state->mode = IQS9151_2F_MODE_PINCH;
                 result->pinch_started = true;
                 state->tap_candidate = false;
+                data->swipe2_armed = false;
             }
         }
 
@@ -5843,6 +5852,7 @@ static int iqs9151_init(const struct device *dev) {
     data->three_finger_two_lead_valid = false;
     iqs9151_three_finger_reset(data);
     data->hold_button = 0U;
+    data->swipe2_armed = true;
     iqs9151_reset_finger_history(data);
     gpio_init_callback(&data->gpio_cb, iqs9151_gpio_cb,
                         BIT(cfg->irq_gpio.pin));
