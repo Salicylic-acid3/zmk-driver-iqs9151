@@ -32,6 +32,8 @@
 #include <errno.h>
 #include <string.h>
 
+#include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 
@@ -380,6 +382,116 @@ static void apply_swipe2_layers(void) {
                (atomic_val_t)read_int32(IQS9151_SETTING_SWIPE2_LAYERS_KEY, -1));
 }
 
+#if IS_ENABLED(CONFIG_ZMK_SPLIT) && IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
+/*
+ * The top layer, carried across the split.
+ *
+ * A peripheral has no keymap, so on its own it cannot tell which layer is
+ * active, and the per-layer swipe switch could only ever bind the half with
+ * the keymap: the other pad swiped whatever the layer said. The central knows,
+ * and tells. Every change of the top layer goes out as a relay event, and a
+ * peripheral that has just connected asks for it, since it missed whatever
+ * was said before. Until an answer arrives the peripheral behaves as it did
+ * before there was one: it swipes.
+ *
+ * The identifiers are three letters because the relay event type name is
+ * CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN (4, with the terminator) long.
+ */
+#include <zmk/events/layer_state_changed.h>
+#include <zmk/events/split_peripheral_status_changed.h>
+
+#define IQS9151_TOP_LAYER_UNKNOWN 0xFF
+
+struct iqs9151_top_layer_changed {
+    uint8_t source;
+    uint8_t layer; /* a layer id, as the app and the keymap file number them */
+} __packed;
+
+struct iqs9151_top_layer_query {
+    uint8_t source;
+} __packed;
+
+ZMK_EVENT_DECLARE(iqs9151_top_layer_changed);
+ZMK_EVENT_DECLARE(iqs9151_top_layer_query);
+ZMK_EVENT_IMPL(iqs9151_top_layer_changed);
+ZMK_EVENT_IMPL(iqs9151_top_layer_query);
+
+/* Each macro expands to nothing on the role it does not apply to. */
+ZMK_RELAY_EVENT_HANDLE(iqs9151_top_layer_changed, tpl, source);
+ZMK_RELAY_EVENT_HANDLE(iqs9151_top_layer_query, tpq, source);
+ZMK_RELAY_EVENT_CENTRAL_TO_PERIPHERAL(iqs9151_top_layer_changed, tpl, source);
+ZMK_RELAY_EVENT_PERIPHERAL_TO_CENTRAL(iqs9151_top_layer_query, tpq, source);
+
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+
+static void iqs9151_tell_top_layer(void) {
+    const zmk_keymap_layer_id_t layer =
+        zmk_keymap_layer_index_to_id(zmk_keymap_highest_layer_active());
+
+    raise_iqs9151_top_layer_changed((struct iqs9151_top_layer_changed){
+        .source = ZMK_RELAY_EVENT_SOURCE_SELF,
+        .layer = (uint8_t)layer,
+    });
+}
+
+static int iqs9151_top_layer_listener(const zmk_event_t *eh) {
+    if (as_zmk_layer_state_changed(eh) != NULL || as_iqs9151_top_layer_query(eh) != NULL) {
+        iqs9151_tell_top_layer();
+    }
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(iqs9151_top_layer, iqs9151_top_layer_listener);
+ZMK_SUBSCRIPTION(iqs9151_top_layer, zmk_layer_state_changed);
+ZMK_SUBSCRIPTION(iqs9151_top_layer, iqs9151_top_layer_query);
+
+#else /* peripheral */
+
+static atomic_t iqs9151_peer_top_layer = ATOMIC_INIT(IQS9151_TOP_LAYER_UNKNOWN);
+
+/*
+ * Asked a moment after the link comes up rather than at once: the status
+ * event fires on the connection, before the central has found this half's
+ * characteristics and subscribed, and a notification sent into that gap is
+ * lost. The answer arrives as a relay event like any other.
+ */
+#define IQS9151_TOP_LAYER_QUERY_DELAY K_MSEC(1500)
+
+static void iqs9151_top_layer_query_work_cb(struct k_work *work) {
+    ARG_UNUSED(work);
+    raise_iqs9151_top_layer_query(
+        (struct iqs9151_top_layer_query){.source = ZMK_RELAY_EVENT_SOURCE_SELF});
+}
+
+static K_WORK_DELAYABLE_DEFINE(iqs9151_top_layer_query_work, iqs9151_top_layer_query_work_cb);
+
+static int iqs9151_top_layer_listener(const zmk_event_t *eh) {
+    const struct iqs9151_top_layer_changed *changed = as_iqs9151_top_layer_changed(eh);
+    if (changed != NULL) {
+        atomic_set(&iqs9151_peer_top_layer, changed->layer);
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    const struct zmk_split_peripheral_status_changed *status =
+        as_zmk_split_peripheral_status_changed(eh);
+    if (status != NULL) {
+        if (status->connected) {
+            k_work_reschedule(&iqs9151_top_layer_query_work, IQS9151_TOP_LAYER_QUERY_DELAY);
+        } else {
+            (void)k_work_cancel_delayable(&iqs9151_top_layer_query_work);
+            atomic_set(&iqs9151_peer_top_layer, IQS9151_TOP_LAYER_UNKNOWN);
+        }
+    }
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(iqs9151_top_layer, iqs9151_top_layer_listener);
+ZMK_SUBSCRIPTION(iqs9151_top_layer, iqs9151_top_layer_changed);
+ZMK_SUBSCRIPTION(iqs9151_top_layer, zmk_split_peripheral_status_changed);
+
+#endif /* role */
+#endif /* split with relay events */
+
 bool iqs9151_setting_swipe2_allowed(void) {
     const uint32_t mask = (uint32_t)atomic_get(&iqs9151_swipe2_layers_mask);
 
@@ -401,6 +513,15 @@ bool iqs9151_setting_swipe2_allowed(void) {
     const zmk_keymap_layer_id_t layer =
         zmk_keymap_layer_index_to_id(zmk_keymap_highest_layer_active());
 
+    return layer < 32U && (mask & BIT(layer)) != 0U;
+#elif IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
+    /* A peripheral has no keymap; the central tells it the top layer (above).
+     * Unknown -- not yet told, or the link is down -- swipes, as before. */
+    const uint32_t layer = (uint32_t)atomic_get(&iqs9151_peer_top_layer);
+
+    if (layer == IQS9151_TOP_LAYER_UNKNOWN) {
+        return true;
+    }
     return layer < 32U && (mask & BIT(layer)) != 0U;
 #else
     /* A peripheral has no keymap and cannot tell which layer is active. */
