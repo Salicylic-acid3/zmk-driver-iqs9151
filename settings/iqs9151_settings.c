@@ -402,6 +402,11 @@ static void apply_swipe2_layers(void) {
 
 #define IQS9151_TOP_LAYER_UNKNOWN 0xFF
 
+/* The central tells the peripheral the top layer again; a no-op elsewhere.
+ * Called when the per-layer mask changes, so a switch flipped in the app
+ * reaches the other pad at once rather than at the next layer change. */
+static void iqs9151_top_layer_resend(void);
+
 struct iqs9151_top_layer_changed {
     uint8_t source;
     uint8_t layer; /* a layer id, as the app and the keymap file number them */
@@ -441,6 +446,8 @@ static int iqs9151_top_layer_listener(const zmk_event_t *eh) {
     return ZMK_EV_EVENT_BUBBLE;
 }
 
+static void iqs9151_top_layer_resend(void) { iqs9151_tell_top_layer(); }
+
 ZMK_LISTENER(iqs9151_top_layer, iqs9151_top_layer_listener);
 ZMK_SUBSCRIPTION(iqs9151_top_layer, zmk_layer_state_changed);
 ZMK_SUBSCRIPTION(iqs9151_top_layer, iqs9151_top_layer_query);
@@ -450,25 +457,49 @@ ZMK_SUBSCRIPTION(iqs9151_top_layer, iqs9151_top_layer_query);
 static atomic_t iqs9151_peer_top_layer = ATOMIC_INIT(IQS9151_TOP_LAYER_UNKNOWN);
 
 /*
- * Asked a moment after the link comes up rather than at once: the status
- * event fires on the connection, before the central has found this half's
- * characteristics and subscribed, and a notification sent into that gap is
- * lost. The answer arrives as a relay event like any other.
+ * Asked a moment after the link comes up, and again until an answer comes.
+ * The status event fires on the connection, before the central has found
+ * this half's characteristics and subscribed, and a notification sent into
+ * that gap is simply lost -- the first version asked once, 1.5 s in, and on
+ * a real link that was usually too early: the left pad went on swiping as if
+ * the switch did not exist, until the next layer change happened to tell it.
+ * So the question is repeated every few seconds while the answer is still
+ * unknown, and backs off after a while in case the other half is a build
+ * that does not answer (an older driver). One tiny relay event each time.
  */
 #define IQS9151_TOP_LAYER_QUERY_DELAY K_MSEC(1500)
+#define IQS9151_TOP_LAYER_QUERY_RETRY K_SECONDS(3)
+#define IQS9151_TOP_LAYER_QUERY_RETRY_SLOW K_SECONDS(60)
+#define IQS9151_TOP_LAYER_QUERY_FAST_TRIES 20
+
+static uint8_t iqs9151_top_layer_query_tries;
+
+static void iqs9151_top_layer_query_work_cb(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(iqs9151_top_layer_query_work, iqs9151_top_layer_query_work_cb);
 
 static void iqs9151_top_layer_query_work_cb(struct k_work *work) {
     ARG_UNUSED(work);
+
+    if (atomic_get(&iqs9151_peer_top_layer) != IQS9151_TOP_LAYER_UNKNOWN) {
+        return;
+    }
     raise_iqs9151_top_layer_query(
         (struct iqs9151_top_layer_query){.source = ZMK_RELAY_EVENT_SOURCE_SELF});
+    if (iqs9151_top_layer_query_tries < IQS9151_TOP_LAYER_QUERY_FAST_TRIES) {
+        iqs9151_top_layer_query_tries++;
+        k_work_reschedule(&iqs9151_top_layer_query_work, IQS9151_TOP_LAYER_QUERY_RETRY);
+    } else {
+        k_work_reschedule(&iqs9151_top_layer_query_work, IQS9151_TOP_LAYER_QUERY_RETRY_SLOW);
+    }
 }
 
-static K_WORK_DELAYABLE_DEFINE(iqs9151_top_layer_query_work, iqs9151_top_layer_query_work_cb);
+static void iqs9151_top_layer_resend(void) {}
 
 static int iqs9151_top_layer_listener(const zmk_event_t *eh) {
     const struct iqs9151_top_layer_changed *changed = as_iqs9151_top_layer_changed(eh);
     if (changed != NULL) {
         atomic_set(&iqs9151_peer_top_layer, changed->layer);
+        (void)k_work_cancel_delayable(&iqs9151_top_layer_query_work);
         return ZMK_EV_EVENT_BUBBLE;
     }
 
@@ -476,6 +507,8 @@ static int iqs9151_top_layer_listener(const zmk_event_t *eh) {
         as_zmk_split_peripheral_status_changed(eh);
     if (status != NULL) {
         if (status->connected) {
+            iqs9151_top_layer_query_tries = 0;
+            atomic_set(&iqs9151_peer_top_layer, IQS9151_TOP_LAYER_UNKNOWN);
             k_work_reschedule(&iqs9151_top_layer_query_work, IQS9151_TOP_LAYER_QUERY_DELAY);
         } else {
             (void)k_work_cancel_delayable(&iqs9151_top_layer_query_work);
@@ -490,6 +523,8 @@ ZMK_SUBSCRIPTION(iqs9151_top_layer, iqs9151_top_layer_changed);
 ZMK_SUBSCRIPTION(iqs9151_top_layer, zmk_split_peripheral_status_changed);
 
 #endif /* role */
+#else
+static void iqs9151_top_layer_resend(void) {}
 #endif /* split with relay events */
 
 bool iqs9151_setting_swipe2_allowed(void) {
@@ -710,6 +745,7 @@ static int iqs9151_settings_event_listener(const zmk_event_t *eh) {
 
     if (strcmp(changed->setting->key, IQS9151_SETTING_SWIPE2_LAYERS_KEY) == 0) {
         apply_swipe2_layers();
+        iqs9151_top_layer_resend();
     } else if (strcmp(changed->setting->key, IQS9151_SETTING_RESOLUTION_X_KEY) == 0 ||
                strcmp(changed->setting->key, IQS9151_SETTING_RESOLUTION_Y_KEY) == 0) {
         apply_resolution();
